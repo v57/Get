@@ -109,3 +109,129 @@ private let exampleInfoHash = hex("9fbb17d030f7f5c51310fa49319eb28a30eb3329")
     #expect(MSE.cryptoProvideRC4 == 0x02)
     #expect(MSE.cryptoProvidePlaintext == 0x01)
 }
+
+// MARK: - MSEHandshake (Task 10)
+
+private let testPeerID = hex("2d474554303030302d4d53453030303030303031")
+
+/// The 68-byte BitTorrent handshake as it appears inside MSE's encrypted IA.
+private func btHandshakeBytes(infoHash: [UInt8], peerID: [UInt8]) -> [UInt8] {
+    [19] + Array("BitTorrent protocol".utf8) + [UInt8](repeating: 0, count: 8) + infoHash + peerID
+}
+
+@Test func testFullHandshakeAgainstFakePeer() async throws {
+    let pipe = LoopbackPipe()
+    let fakePeerID = hex("2d46414b455f504545522d303030303030303031")
+    let handshake = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID))
+    let peerTask = Task {
+        try await FakeMSEPeer.run(over: pipe.responder, infoHash: exampleInfoHash, peerID: fakePeerID)
+    }
+    let result = try await handshake.run(over: pipe.initiator, timeout: .seconds(10))
+
+    // The two RC4 streams are aligned: exchange one known byte each way
+    // BEFORE awaiting the peer task — the responder is blocked reading our
+    // byte and cannot finish until we send it.
+    var initSend = result.sendCipher
+    var initRecv = result.recvCipher
+    var sent: [UInt8] = [FakeMSEPeer.postHandshakeByte]
+    initSend.stream(&sent)
+    try await pipe.initiator.write(Data(sent))
+
+    let encryptedReply = try await pipe.initiator.read(1)
+    var replyBytes = [UInt8](encryptedReply)
+    initRecv.stream(&replyBytes)
+    #expect(replyBytes == [FakeMSEPeer.replyByte])
+
+    let peerResult = try await peerTask.value
+
+    // Both sides saw each other's 68-byte handshake, decrypted.
+    let expectedPeerHandshake = Data(btHandshakeBytes(infoHash: exampleInfoHash, peerID: fakePeerID))
+    #expect(result.peerHandshakeBytes == expectedPeerHandshake)
+    #expect(peerResult.peerHandshake == expectedPeerHandshake)
+    #expect(peerResult.receivedHandshake == Data(btHandshakeBytes(infoHash: exampleInfoHash, peerID: testPeerID)))
+    #expect(peerResult.receivedByte == FakeMSEPeer.postHandshakeByte)
+}
+
+@Test func testPlaintextResponseDropped() async throws {
+    let pipe = LoopbackPipe()
+    let handshake = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID))
+    let peerTask = Task {
+        try await FakeMSEPeer.run(over: pipe.responder, infoHash: exampleInfoHash, peerID: testPeerID, mode: .plaintext)
+    }
+    await #expect(throws: MSEHandshakeError.peerDoesNotSupportEncryption) {
+        try await handshake.run(over: pipe.initiator, timeout: .seconds(5))
+    }
+    _ = try await peerTask.value
+}
+
+@Test func testBadVC() async throws {
+    // The responder encrypts its reply with keys derived from a wrong secret:
+    // the initiator's ENCRYPT(VC) resync scan can never succeed.
+    let pipe = LoopbackPipe()
+    let handshake = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID))
+    let peerTask = Task {
+        try await FakeMSEPeer.run(over: pipe.responder, infoHash: exampleInfoHash, peerID: testPeerID, mode: .badVC)
+    }
+    await #expect(throws: MSEHandshakeError.handshakeFailed) {
+        try await handshake.run(over: pipe.initiator, timeout: .seconds(5))
+    }
+    _ = try await peerTask.value
+}
+
+@Test func testCryptoSelectNotRC4() async throws {
+    // We only offered RC4 (crypto_provide = 0x02); a peer selecting
+    // plaintext-only (0x01) must be rejected.
+    let pipe = LoopbackPipe()
+    let handshake = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID))
+    let peerTask = Task {
+        try await FakeMSEPeer.run(over: pipe.responder, infoHash: exampleInfoHash, peerID: testPeerID, mode: .cryptoSelectPlaintext)
+    }
+    await #expect(throws: MSEHandshakeError.cryptoNotSelected) {
+        try await handshake.run(over: pipe.initiator, timeout: .seconds(5))
+    }
+    _ = try await peerTask.value
+}
+
+@Test func testHandshakeMismatchedInfoHash() async throws {
+    // The responder's encrypted handshake carries a different infohash.
+    let pipe = LoopbackPipe()
+    let handshake = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID))
+    let peerTask = Task {
+        try await FakeMSEPeer.run(over: pipe.responder, infoHash: exampleInfoHash, peerID: testPeerID, mode: .mismatchedInfoHash)
+    }
+    await #expect(throws: MSEHandshakeError.handshakeFailed) {
+        try await handshake.run(over: pipe.initiator, timeout: .seconds(5))
+    }
+    _ = try await peerTask.value
+}
+
+@Test func testPrivateKeyInjection() async throws {
+    let key = hex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+    let pub = MSEHandshake.publicKey(for: key)
+    #expect(pub == modPow([2], key, MSEPrime.bytes))
+    #expect(pub.count == 96)
+    #expect(MSEHandshake.publicKey(for: key) == pub)  // deterministic
+
+    // The injected key is what actually goes on the wire: run a full handshake
+    // and have the fake responder report the public key it received, which
+    // must equal g^key mod p.
+    let pipe = LoopbackPipe()
+    let handshake = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID), privateKey: key)
+    let peerTask = Task {
+        try await FakeMSEPeer.run(over: pipe.responder, infoHash: exampleInfoHash, peerID: testPeerID)
+    }
+    let result = try await handshake.run(over: pipe.initiator, timeout: .seconds(10))
+
+    // The responder is blocked reading our post-handshake byte — send it and
+    // drain its reply before awaiting the peer task.
+    var send = result.sendCipher
+    var recv = result.recvCipher
+    var sent: [UInt8] = [FakeMSEPeer.postHandshakeByte]
+    send.stream(&sent)
+    try await pipe.initiator.write(Data(sent))
+    var reply = [UInt8](try await pipe.initiator.read(1))
+    recv.stream(&reply)
+
+    let peerResult = try await peerTask.value
+    #expect(peerResult.receivedPublicKey == pub)
+}

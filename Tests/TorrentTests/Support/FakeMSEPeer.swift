@@ -202,6 +202,8 @@ struct FakeMSEPeer {
         peerID: [UInt8],
         mode: Mode = .encrypted
     ) async throws -> (sendCipher: RC4, recvCipher: RC4, receivedHandshake: Data, receivedPublicKey: [UInt8]) {
+        precondition(infoHash.count == 20, "infoHash must be 20 bytes")
+        precondition(peerID.count == 20, "peerID must be 20 bytes")
         // 1. Read the initiator's public key (exactly 96 bytes).
         let ya = Array(try await channel.read(96))
 

@@ -139,6 +139,15 @@ public actor TorrentSession {
     public func start() async throws {
         guard state == .stopped else { return }
         try await disk.prepare()
+        applyResumeState()
+
+        if verifiedPieces.count == picker.pieceCount {
+            // Every piece already verified in a previous session: go straight
+            // to completion without announcing.
+            await finishDownload()
+            return
+        }
+
         state = .downloading
         emit(.state(.downloading))
         startStatsLoop()
@@ -157,6 +166,7 @@ public actor TorrentSession {
         paused = true
         state = .paused
         emit(.state(.paused))
+        saveResumeState()
     }
 
     public func resume() async {
@@ -168,6 +178,9 @@ public actor TorrentSession {
 
     public func cancel() async {
         guard state != .stopped, state != .completed else { return }
+        // Persist progress before tearing down so a later session can resume
+        // from here without re-fetching verified pieces.
+        saveResumeState()
         fireAndForgetAnnounce(event: "stopped")
         for (_, task) in peerTasks { task.cancel() }
         peerTasks.removeAll()
@@ -422,9 +435,46 @@ public actor TorrentSession {
         stats.verifiedBytes += Int64(pieceSize)
         emit(.pieceVerified(index))
 
+        // Persist resume state every 16 verified pieces (and on pause/cancel)
+        // so an interrupted download can resume from here.
+        if verifiedPieces.count % 16 == 0 {
+            saveResumeState()
+        }
+
         if verifiedPieces.count == picker.pieceCount {
             await finishDownload()
         }
+    }
+
+    // MARK: - Resume
+
+    /// Seed the verified-piece set and picker cursor from persisted resume
+    /// state. Trusts the persisted bitfield (no re-hash on start); a state
+    /// file whose piece length or total size doesn't match this torrent is
+    /// ignored. Best effort — a missing or corrupt state simply means the
+    /// download starts from scratch.
+    private func applyResumeState() {
+        guard let resume = ResumeState.load(infoHash: torrent.infoHash) else { return }
+        guard resume.pieceLength == torrent.pieceLength,
+              resume.totalSize == torrent.totalSize else { return }
+        for index in resume.verified.sorted() {
+            guard index >= 0, index < picker.pieceCount,
+                  !verifiedPieces.contains(index) else { continue }
+            verifiedPieces.insert(index)
+            picker.advancePast(index)
+            stats.verifiedBytes += Int64(picker.pieceSize(of: index))
+        }
+    }
+
+    /// Persist the current verified-piece set so a later session can resume
+    /// without re-fetching. Best effort — a failed write never fails the
+    /// download.
+    private func saveResumeState() {
+        guard !verifiedPieces.isEmpty else { return }
+        ResumeState(pieceLength: torrent.pieceLength,
+                    totalSize: torrent.totalSize,
+                    verified: verifiedPieces.sorted())
+            .save(infoHash: torrent.infoHash)
     }
 
     private func finishDownload() async {

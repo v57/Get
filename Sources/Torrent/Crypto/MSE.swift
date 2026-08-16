@@ -80,6 +80,12 @@ public protocol MSEByteChannel: Sendable {
     func read(_ count: Int) async throws -> Data
 }
 
+/// Optional: discard buffered incoming bytes (used by test fakes before a
+/// close that would otherwise send RST with unread data).
+public extension MSEByteChannel {
+    func drain() async {}
+}
+
 /// The result of a successful initiator MSE handshake: the two RC4 ciphers —
 /// already past the 1024-byte keystream drop *and* the handshake exchange, so
 /// their streams continue directly into the wire protocol — plus the peer's

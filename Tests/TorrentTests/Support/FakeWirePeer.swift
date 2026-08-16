@@ -37,6 +37,21 @@ final class FDByteChannel: MSEByteChannel, @unchecked Sendable {
         return out
     }
 
+    /// Read and discard bytes until EOF (or the stop flag fires). Used before
+    /// closing a socket that still has unread data: closing with unread data
+    /// sends TCP RST, which discards the peer's buffered bytes — the classic
+    /// cause of flaky plaintext-fake tests under load.
+    func drain() async {
+        var scratch = [UInt8](repeating: 0, count: 4096)
+        while !stop.isSet {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pr = poll(&pfd, 1, 200)
+            if pr <= 0 { continue }
+            let n = Darwin.read(fd, &scratch, scratch.count)
+            if n <= 0 { return }  // EOF or error
+        }
+    }
+
     /// Blocking single-byte read (poll + read), returning exactly one byte.
     private func readByte() throws -> UInt8 {
         while true {

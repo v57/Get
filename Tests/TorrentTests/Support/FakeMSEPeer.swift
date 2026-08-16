@@ -208,9 +208,13 @@ struct FakeMSEPeer {
         let ya = Array(try await channel.read(96))
 
         // Plaintext mode: answer with a standard BT handshake instead of
-        // [Yb][PadB] — an encrypted-only client must drop us.
+        // [Yb][PadB] — an encrypted-only client must drop us. Drain the
+        // client's unread PadA first so close() sends a clean FIN: closing
+        // with unread data sends RST, which can discard the handshake we just
+        // sent (flaky under parallel load).
         if mode == .plaintext {
             try await channel.write(Data(btHandshake(infoHash: infoHash, peerID: peerID)))
+            await channel.drain()
             return (RC4(key: []), RC4(key: []), Data(), ya)
         }
 

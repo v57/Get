@@ -276,6 +276,7 @@ public actor TorrentSession {
         var choked = true
         var sentOurBitfield = false
         var loggedNoUpload = false
+        var established = false
 
         defer {
             picker.disconnect(key)
@@ -287,6 +288,7 @@ public actor TorrentSession {
 
         do {
             try await connection.start()
+            established = true
             stats.peersConnected += 1
             stats.peersSeen += 1
             emit(.peer(.connected("\(host):\(port)")))
@@ -333,11 +335,20 @@ public actor TorrentSession {
         } catch let error as PeerConnectionError {
             if case .peerDoesNotSupportEncryption = error {
                 emit(.peer(.dropped("\(host):\(port) — plaintext peer rejected")))
-            } else {
+            } else if established {
                 emit(.peer(.disconnected("\(host):\(port) — \(error)")))
+            } else {
+                emit(.peer(.dropped("\(host):\(port) — \(error)")))
             }
         } catch {
-            emit(.peer(.disconnected("\(host):\(port) — \(error)")))
+            // Any failure before the connection was established (including a
+            // cancellation racing the connect) means the peer never became
+            // usable — report it as dropped, not disconnected.
+            if established {
+                emit(.peer(.disconnected("\(host):\(port) — \(error)")))
+            } else {
+                emit(.peer(.dropped("\(host):\(port) — \(error)")))
+            }
         }
     }
 

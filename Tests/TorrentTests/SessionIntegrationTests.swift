@@ -124,7 +124,8 @@ private func waitForState(_ target: TorrentState,
     let deadline = clock.now.advanced(by: .seconds(15))
     for await event in events {
         if case .peer(.dropped) = event { sawDrop = true }
-        if case .state(let s) = event, s == .completed { completed = true; break }
+        if case .state(let s) = event, s == .completed { completed = true }
+        if completed && sawDrop { break }
         if clock.now > deadline { break }
     }
 

@@ -32,7 +32,9 @@ Plan: .hermes/plans/2026-08-16_174727-torrent-download-engine.md
 - [x] T15 Sequential piece picker  — commit bf65d57 (9 behaviors via harness)
 - [x] T16 FileLayout + DiskWriter  — commit c8bb69d (9 + 8 tests)
 - [x] T17 TorrentSession engine (hermetic E2E: FakeSeeder)  — commits 021e59e + d7c0a58 (4 E2E tests; full sequential download byte-identical, no-upload, plaintext-drop, placement, cancel). NOTE: canonical suite runs SERIAL: `swift test --no-parallel` (parallel socket tests flake on this macOS 27 beta)
-- [ ] T18 Resume state (stretch)
+- [x] T18 Resume state (stretch)  — commit f9eaaf7 (+29f9618: seed before disk prepare). 5 ResumeTests: roundtrip, hex-named file URL, missing/corrupt → nil, session-level resume skips verified prefix
 
 ## Phase 6 — App UI
-- [ ] T19 DownloadStore + TorrentView (ContentView rewrite)
+- [x] T19 DownloadStore + TorrentView (ContentView rewrite)  — commit bbfa914. @Observable DownloadStore, NavigationStack list with progress, fileImporter; xcodebuild BUILD SUCCEEDED
+
+## Done — 21 commits, full suite 127/127 (`swift test --no-parallel`), app builds

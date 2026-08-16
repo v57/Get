@@ -138,7 +138,9 @@ public actor TorrentSession {
 
     public func start() async throws {
         guard state == .stopped else { return }
-        try await disk.prepare()
+        // Seed resume state before prepare(): a resume is only valid when the
+        // data files already exist in the save directory, and prepare() would
+        // create them from scratch.
         applyResumeState()
 
         if verifiedPieces.count == picker.pieceCount {
@@ -148,6 +150,7 @@ public actor TorrentSession {
             return
         }
 
+        try await disk.prepare()
         state = .downloading
         emit(.state(.downloading))
         startStatsLoop()
@@ -448,12 +451,25 @@ public actor TorrentSession {
 
     // MARK: - Resume
 
+    /// The torrent's data files already exist in the save directory with
+    /// their exact torrent lengths — the precondition for trusting persisted
+    /// resume state. Must be evaluated before `disk.prepare()`, which would
+    /// create the files from scratch.
+    private var resumeDataFilesPresent: Bool {
+        layout.entries.allSatisfy { entry in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: entry.url.path) else { return false }
+            return (attrs[.size] as? NSNumber)?.int64Value == entry.length
+        }
+    }
+
     /// Seed the verified-piece set and picker cursor from persisted resume
     /// state. Trusts the persisted bitfield (no re-hash on start); a state
-    /// file whose piece length or total size doesn't match this torrent is
-    /// ignored. Best effort — a missing or corrupt state simply means the
+    /// file is ignored when it doesn't match this torrent (piece length or
+    /// total size) or when the data files aren't present in the save
+    /// directory. Best effort — a missing or corrupt state simply means the
     /// download starts from scratch.
     private func applyResumeState() {
+        guard resumeDataFilesPresent else { return }
         guard let resume = ResumeState.load(infoHash: torrent.infoHash) else { return }
         guard resume.pieceLength == torrent.pieceLength,
               resume.totalSize == torrent.totalSize else { return }

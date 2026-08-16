@@ -192,12 +192,16 @@ struct FakeMSEPeer {
     static let postHandshakeByte: UInt8 = 0x42
     static let replyByte: UInt8 = 0x99
 
-    static func run(
+    /// Responder-side MSE handshake: steps 1-7 (everything before the
+    /// post-handshake byte exchange). Returns the continuing RC4 ciphers
+    /// (positioned exactly where the wire protocol resumes), the initiator's
+    /// decrypted 68-byte handshake, and the initiator's public key.
+    static func responderHandshake(
         over channel: MSEByteChannel,
         infoHash: [UInt8],
         peerID: [UInt8],
         mode: Mode = .encrypted
-    ) async throws -> Result {
+    ) async throws -> (sendCipher: RC4, recvCipher: RC4, receivedHandshake: Data, receivedPublicKey: [UInt8]) {
         // 1. Read the initiator's public key (exactly 96 bytes).
         let ya = Array(try await channel.read(96))
 
@@ -205,8 +209,7 @@ struct FakeMSEPeer {
         // [Yb][PadB] — an encrypted-only client must drop us.
         if mode == .plaintext {
             try await channel.write(Data(btHandshake(infoHash: infoHash, peerID: peerID)))
-            return Result(receivedPublicKey: ya, sendCipher: RC4(key: []), recvCipher: RC4(key: []),
-                          peerHandshake: Data(), receivedHandshake: Data(), receivedByte: 0)
+            return (RC4(key: []), RC4(key: []), Data(), ya)
         }
 
         // 2. Our key pair; reply [Yb 96][PadB 0-512].
@@ -270,7 +273,6 @@ struct FakeMSEPeer {
         let select: UInt32 = mode == .cryptoSelectPlaintext ? MSE.cryptoProvidePlaintext : MSE.cryptoProvideRC4
         var reply = MSE.vc + be32Bytes(select) + [0, 0] + myHandshake
 
-        var receivedByte: UInt8 = 0
         if mode == .badVC {
             // Encrypt with keys derived from a *different* secret so the
             // initiator's ENCRYPT(VC) scan cannot succeed...
@@ -286,9 +288,31 @@ struct FakeMSEPeer {
         }
         try await channel.write(Data(reply))
 
+        return (sendCipher, recvCipher, receivedHandshake, ya)
+    }
+
+    static func run(
+        over channel: MSEByteChannel,
+        infoHash: [UInt8],
+        peerID: [UInt8],
+        mode: Mode = .encrypted
+    ) async throws -> Result {
+        let handshake = try await responderHandshake(over: channel, infoHash: infoHash, peerID: peerID, mode: mode)
+        var sendCipher = handshake.sendCipher
+        var recvCipher = handshake.recvCipher
+
+        // The 68-byte handshake this peer sent (empty in plaintext mode).
+        var myHandshake: [UInt8] = []
+        if mode != .plaintext {
+            let handshakeInfoHash = mode == .mismatchedInfoHash ? wrongInfoHash : infoHash
+            myHandshake = btHandshake(infoHash: handshakeInfoHash, peerID: peerID)
+        }
+
         // 8. (encrypted mode only) post-handshake byte roundtrip: proves the
         //    two RC4 streams on both sides are aligned.
+        var receivedByte: UInt8 = 0
         if mode == .encrypted {
+            var reader = BufferedChannelReader(channel: channel)
             var encrypted = Array(try await reader.read(1))
             recvCipher.stream(&encrypted)
             guard encrypted == [postHandshakeByte] else { throw MSEHandshakeError.handshakeFailed }
@@ -298,8 +322,8 @@ struct FakeMSEPeer {
             try await channel.write(Data(out))
         }
 
-        return Result(receivedPublicKey: ya, sendCipher: sendCipher, recvCipher: recvCipher,
-                      peerHandshake: Data(myHandshake), receivedHandshake: receivedHandshake,
+        return Result(receivedPublicKey: handshake.receivedPublicKey, sendCipher: sendCipher, recvCipher: recvCipher,
+                      peerHandshake: Data(myHandshake), receivedHandshake: handshake.receivedHandshake,
                       receivedByte: receivedByte)
     }
 

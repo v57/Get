@@ -9,6 +9,7 @@ struct TorrentView: View {
     @State private var store = DownloadStore()
     @State private var showImporter = false
     @State private var selectedID: String?
+    @State private var isDropTargeted = false
 
     var body: some View {
         NavigationSplitView {
@@ -25,6 +26,29 @@ struct TorrentView: View {
                 )
             }
         }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.accentColor, lineWidth: 2)
+                    .padding(6)
+                    .overlay {
+                        Text("Drop to download")
+                            .font(.headline)
+                            .padding(10)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+            return true
+        }
+        .onAppear {
+            // Hand the live store to the app delegate so "Open With…" events
+            // reach it (and any queued from a cold start are drained).
+            AppDelegate.attach(store: store)
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -40,15 +64,7 @@ struct TorrentView: View {
             allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data]
         ) { result in
             guard case .success(let url) = result else { return }
-            Task {
-                let accessing = url.startAccessingSecurityScopedResource()
-                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    try await store.openTorrent(url: url)
-                } catch {
-                    store.lastError = error.localizedDescription
-                }
-            }
+            Task { await store.open(url: url) }
         }
         .alert(
             "Couldn't Open Torrent",
@@ -60,6 +76,25 @@ struct TorrentView: View {
             Button("OK", role: .cancel) { store.lastError = nil }
         } message: {
             Text(store.lastError ?? "")
+        }
+    }
+
+    /// Open every dropped file that is a `.torrent`. Non-torrent files are
+    /// reported as an error so the drop isn't silently ignored.
+    private func handleDrop(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            // loadObject (not loadItem — deprecated in the macOS 27 SDK);
+            // the completion's item is already URL?.
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in
+                    guard url.pathExtension.lowercased() == "torrent" else {
+                        store.lastError = "Not a .torrent file: \(url.lastPathComponent)"
+                        return
+                    }
+                    await store.open(url: url)
+                }
+            }
         }
     }
 

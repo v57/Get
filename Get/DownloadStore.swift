@@ -48,6 +48,18 @@ final class DownloadStore {
     private var sessions: [String: TorrentSession] = [:]
     private var eventTasks: [String: Task<Void, Never>] = [:]
 
+    /// Open a `.torrent` file from any source (file importer, drag & drop,
+    /// "Open With…"). Starts the download; failures surface as `lastError`.
+    func open(url: URL) async {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        do {
+            try await openTorrent(url: url)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     /// Parse a `.torrent` file and start downloading it.
     func openTorrent(url: URL) async throws {
         let torrent = try TorrentSession.parse(url: url)

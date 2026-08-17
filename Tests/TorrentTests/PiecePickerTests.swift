@@ -142,6 +142,70 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
     #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 3, begin: 0, length: 16 * 1024))
 }
 
+// MARK: - Fetch order (priorities)
+
+@Test func setOrderControlsFetchSequence() {
+    var picker = makePicker(pieceCount: 8)
+    picker.setOrder([5, 6, 7, 0, 1, 2, 3, 4])
+    picker.setAllAvailable(on: peerA)
+
+    // Pieces come out in the given order, not ascending.
+    var assigned: [Int] = []
+    while let block = picker.request(for: peerA, pipeline: 32) {
+        assigned.append(block.piece)
+    }
+    #expect(assigned == [5, 6, 7, 0, 1, 2, 3, 4])
+    #expect(picker.cursor == 5, "frontier is the first piece of the order")
+}
+
+@Test func setOrderOmitsPiecesFromFetch() {
+    var picker = makePicker(pieceCount: 6)
+    // Pieces 0 and 1 are already verified — exclude them from the order.
+    picker.setOrder([2, 3, 4, 5])
+    picker.setAllAvailable(on: peerA)
+
+    var assigned: [Int] = []
+    while let block = picker.request(for: peerA, pipeline: 32) {
+        assigned.append(block.piece)
+    }
+    #expect(assigned == [2, 3, 4, 5])
+    #expect(picker.cursor == 2)
+}
+
+@Test func advancePastFollowsOrderNotNumericOrder() {
+    var picker = makePicker(pieceCount: 8)
+    picker.setOrder([4, 5, 6, 7, 0, 1, 2, 3])
+    picker.setAllAvailable(on: peerA)
+
+    // After verifying piece 7 (position 3), the frontier is piece 0 — the
+    // next piece in fetch order — not piece 8.
+    picker.advancePast(7)
+    #expect(picker.cursor == 0)
+    #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+}
+
+@Test func setOrderIgnoresInvalidOrders() {
+    var picker = makePicker(pieceCount: 4)
+
+    picker.setOrder([0, 1, 1, 3])       // duplicate
+    #expect(picker.order == [0, 1, 2, 3])
+    picker.setOrder([0, 1, 2, 9])       // out of range
+    #expect(picker.order == [0, 1, 2, 3])
+    picker.setOrder([0, 1, 2])          // missing pieces (subset is fine)
+    #expect(picker.order == [0, 1, 2])
+}
+
+@Test func setOrderResetsFrontierToFirstUnverified() {
+    var picker = makePicker(pieceCount: 6)
+    picker.setAllAvailable(on: peerA)
+    _ = picker.request(for: peerA, pipeline: 4)  // piece 0 in flight
+    picker.advancePast(0)
+
+    // Reordering mid-download resets the frontier to the new order's head.
+    picker.setOrder([3, 4, 5, 1, 2])
+    #expect(picker.cursor == 3)
+}
+
 // MARK: - Availability
 
 @Test func setAllAvailableMakesEveryPieceRequestable() {

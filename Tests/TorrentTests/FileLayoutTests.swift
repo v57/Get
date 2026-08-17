@@ -120,6 +120,34 @@ private func makeTwoFileLayout() throws -> FileLayout {
     #expect(spans[1].file == 2 && spans[1].offset == 0 && spans[1].length == 4)
 }
 
+// MARK: - Byte offset → file index
+
+@Test func fileIndexMapsOffsetsToFiles() throws {
+    let layout = try makeTwoFileLayout()  // file0 = bytes 0..100, file1 = 100..200
+
+    #expect(layout.fileIndex(ofByteOffset: 0) == 0)
+    #expect(layout.fileIndex(ofByteOffset: 50) == 0)
+    #expect(layout.fileIndex(ofByteOffset: 99) == 0)
+    #expect(layout.fileIndex(ofByteOffset: 100) == 1)
+    #expect(layout.fileIndex(ofByteOffset: 199) == 1)
+}
+
+@Test func fileIndexSkipsZeroLengthFiles() throws {
+    let files: [(path: [String], data: Data)] = [
+        (["a.bin"], Data(repeating: 0x01, count: 10)),
+        (["hole.bin"], Data()),
+        (["b.bin"], Data(repeating: 0x02, count: 10)),
+    ]
+    let (_, torrent, _) = try SyntheticTorrent.make(data: Data(), pieceLength: 64, name: "holes", files: files)
+    let layout = try FileLayout(torrent: torrent, baseDirectory: makeTempDir("FileLayoutHoles"))
+
+    // Bytes 0..10 → file 0; byte 10 (past the zero-length file) → file 2.
+    #expect(layout.fileIndex(ofByteOffset: 0) == 0)
+    #expect(layout.fileIndex(ofByteOffset: 9) == 0)
+    #expect(layout.fileIndex(ofByteOffset: 10) == 2)
+    #expect(layout.fileIndex(ofByteOffset: 19) == 2)
+}
+
 // MARK: - Sanitization
 
 @Test func sanitizeRejectsEmptyDotDotDotAndSlashes() {

@@ -166,6 +166,101 @@ private func waitForState(_ target: TorrentState,
     #expect(try Data(contentsOf: dir.appendingPathComponent("show/b.bin")) == fileB)
 }
 
+@Test func testFilePrioritiesReorderDownload() async throws {
+    // File A = pieces 0-1 (2 × 16 KiB), File B = pieces 2-4 (3 × 16 KiB).
+    // Prioritizing B must fetch 2,3,4 before 0,1.
+    let fileA = makeContent(32 * 1024)
+    let fileB = makeContent(48 * 1024)
+    let content = fileA + fileB
+    let files: [(path: [String], data: Data)] = [
+        (["a.bin"], fileA),
+        (["b.bin"], fileB),
+    ]
+    let seeder = try FakeSeeder(content: content, pieceLength: 16 * 1024,
+                                infoHash: [UInt8](repeating: 0xAB, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8))
+    defer { seeder.stop() }
+    let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+    let bundle = try SyntheticTorrent.make(data: Data(), pieceLength: 16 * 1024,
+                                           name: "prio", files: files,
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+    let dir = try makeTempDir("prio")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    // File index 1 (b.bin) → priority 1: fetched before the unprioritized a.bin.
+    await session.setFilePriorities([1: 1])
+
+    try await session.start()
+    let completed = await waitForState(.completed, in: await session.events, timeout: .seconds(15))
+    #expect(completed)
+
+    // Byte-identical placement for both files.
+    #expect(try Data(contentsOf: dir.appendingPathComponent("prio/a.bin")) == fileA)
+    #expect(try Data(contentsOf: dir.appendingPathComponent("prio/b.bin")) == fileB)
+
+    // The seeder saw the prioritized file's pieces requested first, in
+    // ascending order, then the rest.
+    let requested = try await seeder.waitForResult(timeout: .seconds(5)).receivedMessages
+        .compactMap { message -> Int? in
+            if case .request(let index, _, _) = message { return index }
+            return nil
+        }
+    #expect(requested.prefix(3) == [2, 3, 4], "prioritized file was not fetched first: \(requested)")
+}
+
+@Test func testPerFileProgressInStats() async throws {
+    // 100_000 + 100_000 bytes at 16 KiB pieces: piece 6 straddles the file
+    // boundary (file A ends at 100_000, which is 6*16_384 + 1_696). Per-file
+    // progress must attribute the straddling piece exactly.
+    let fileA = makeContent(100_000)
+    let fileB = makeContent(100_000)
+    let content = fileA + fileB
+    let files: [(path: [String], data: Data)] = [
+        (["a.bin"], fileA),
+        (["b.bin"], fileB),
+    ]
+    let seeder = try FakeSeeder(content: content, pieceLength: 16 * 1024,
+                                infoHash: [UInt8](repeating: 0xAB, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8))
+    defer { seeder.stop() }
+    let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+    let bundle = try SyntheticTorrent.make(data: Data(), pieceLength: 16 * 1024,
+                                           name: "prog", files: files,
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+    let dir = try makeTempDir("prog")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    try await session.start()
+
+    var finalFileProgress: [Int64] = []
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(15))
+    var completed = false
+    for await event in events {
+        if case .stats(let stats) = event {
+            if stats.fileVerifiedBytes.count == 2 {
+                finalFileProgress = stats.fileVerifiedBytes
+            }
+        }
+        if case .state(let s) = event, s == .completed { completed = true; break }
+        if clock.now > deadline { break }
+    }
+    #expect(completed, "download did not complete in time")
+    #expect(finalFileProgress == [100_000, 100_000],
+            "per-file progress is wrong: \(finalFileProgress)")
+}
+
 @Test func testCancelMidDownload() async throws {
     // 2 MiB with a per-block serve delay so the download takes ~0.5s and the
     // cancel lands mid-flight.

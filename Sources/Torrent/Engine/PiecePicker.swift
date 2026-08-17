@@ -9,19 +9,34 @@ public struct PeerID: Sendable, Equatable, Hashable {
 
 /// Strictly sequential piece picker.
 ///
-/// Blocks are handed out in ascending piece order starting at `cursor`, each
-/// peer is limited to `pipeline` outstanding blocks, and a block is never
-/// assigned to two peers at once (blocks in flight anywhere are excluded).
-/// If the cursor piece is available on no peer at all, no peer may skip ahead
-/// of it — `request` returns nil for everyone until availability appears.
+/// Blocks are handed out in fetch order (by default ascending piece order
+/// starting at the cursor), each peer is limited to `pipeline` outstanding
+/// blocks, and a block is never assigned to two peers at once (blocks in
+/// flight anywhere are excluded). If the cursor piece is available on no
+/// peer at all, no peer may skip ahead of it — `request` returns nil for
+/// everyone until availability appears. `setOrder` replaces the fetch
+/// sequence (e.g. a file-priority ordering); pieces not in the order are
+/// never requested.
 public struct PiecePicker: Sendable {
     public let pieceCount: Int
     public let pieceLength: Int
     public let lastPieceLength: Int
     public var blockSize: Int = 16 * 1024
 
-    /// Lowest unverified piece (never decreases).
-    public var cursor = 0
+    /// Fetch order: the piece sequence handed out by `request`, front to
+    /// back. Defaults to ascending `0..<pieceCount`; `setOrder` replaces it
+    /// with any deduplicated subset of valid piece indices (typically a
+    /// file-priority ordering that omits already-verified pieces).
+    public private(set) var order: [Int]
+
+    /// Position in `order` of the lowest unverified piece (never decreases).
+    public private(set) var cursorPos = 0
+
+    /// The frontier piece: `order[cursorPos]`, or `pieceCount` when every
+    /// piece in the fetch order is verified.
+    public var cursor: Int {
+        cursorPos < order.count ? order[cursorPos] : pieceCount
+    }
 
     /// Pieces each peer has announced via bitfield/have messages.
     public private(set) var peerHas: [PeerID: Set<Int>] = [:]
@@ -54,6 +69,18 @@ public struct PiecePicker: Sendable {
         self.pieceLength = pieceLength
         self.lastPieceLength = lastPieceLength
         self.blockSize = blockSize
+        self.order = Array(0..<pieceCount)
+    }
+
+    /// Replace the fetch sequence with `newOrder` — distinct valid piece
+    /// indices in the order they should be requested (verified pieces should
+    /// be omitted). The frontier resets to the first piece of the new order.
+    /// An invalid order (out-of-range or duplicated indices) is ignored.
+    public mutating func setOrder(_ newOrder: [Int]) {
+        guard newOrder.allSatisfy({ $0 >= 0 && $0 < pieceCount }),
+              Set(newOrder).count == newOrder.count else { return }
+        order = newOrder
+        cursorPos = 0
     }
 
     /// Replace the peer's announced availability with `pieces`.
@@ -66,20 +93,23 @@ public struct PiecePicker: Sendable {
         peerHas[peer] = Set(0..<pieceCount)
     }
 
-    /// Assign the earliest block this peer can fetch: the earliest piece >= cursor
-    /// that the peer has, choosing its earliest block that is not in flight
-    /// anywhere. Respects the per-peer pipeline limit.
+    /// Assign the earliest block this peer can fetch: the earliest piece in
+    /// fetch order (>= the cursor) that the peer has, choosing its earliest
+    /// block that is not in flight anywhere. Respects the per-peer pipeline
+    /// limit.
     ///
-    /// Returns nil when the peer is at its pipeline limit, has nothing to fetch,
-    /// or the cursor piece is available on no peer at all (strict sequential:
-    /// nobody skips ahead of an unavailable piece).
+    /// Returns nil when the peer is at its pipeline limit, has nothing to
+    /// fetch, or the cursor piece is available on no peer at all (strict
+    /// sequential: nobody skips ahead of an unavailable piece).
     public mutating func request(for peer: PeerID, pipeline: Int) -> Block? {
         guard pending[peer, default: []].count < pipeline else { return nil }
+        guard cursorPos < order.count else { return nil }
         // Strict sequential semantics: if the cursor piece exists on no peer,
         // no peer may skip past it.
-        guard peerHas.values.contains(where: { $0.contains(cursor) }) else { return nil }
-        var piece = cursor
-        while piece < pieceCount {
+        guard peerHas.values.contains(where: { $0.contains(order[cursorPos]) }) else { return nil }
+        var pos = cursorPos
+        while pos < order.count {
+            let piece = order[pos]
             if peerHas[peer]?.contains(piece) == true {
                 let blocks = blockCount(of: piece)
                 var inflight = Set<BlockKey>()
@@ -95,7 +125,7 @@ public struct PiecePicker: Sendable {
                     }
                 }
             }
-            piece += 1
+            pos += 1
         }
         return nil
     }
@@ -112,9 +142,11 @@ public struct PiecePicker: Sendable {
         peerHas[peer] = nil
     }
 
-    /// A piece was verified: the cursor moves past it (never backwards).
+    /// A piece was verified: the cursor moves past it in fetch order (never
+    /// backwards). Pieces not in the fetch order are ignored.
     public mutating func advancePast(_ piece: Int) {
-        cursor = max(cursor, piece + 1)
+        guard let pos = order.firstIndex(of: piece) else { return }
+        cursorPos = max(cursorPos, pos + 1)
     }
 
     /// Number of blocks in `piece`.

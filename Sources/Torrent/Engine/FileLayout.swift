@@ -108,6 +108,27 @@ public struct FileLayout: Sendable {
         return result
     }
 
+    /// The index of the file containing byte `offset` of the content stream.
+    ///
+    /// Binary search over the prefix sums; a zero-length file never contains
+    /// any byte, so offsets land in the file whose range strictly contains
+    /// them. The offset must lie within `0..<totalSize`.
+    public func fileIndex(ofByteOffset offset: Int64) -> Int {
+        precondition(offset >= 0, "byte offset is negative")
+        precondition(offset < (fileEnds.last ?? 0), "byte offset past the content stream")
+        var low = 0
+        var high = entries.count - 1
+        while low < high {
+            let mid = (low + high) / 2
+            if offset < fileEnds[mid] {
+                high = mid
+            } else {
+                low = mid + 1
+            }
+        }
+        return low
+    }
+
     /// Validate one path component from an untrusted torrent.
     ///
     /// Rejects empty components, ".", "..", and any component containing "/",

@@ -37,16 +37,21 @@ public struct TorrentStats: Sendable, Equatable {
     public var peersSeen: Int
     public var downloadSpeed: Double
     public var progress: Double
+    /// Verified bytes per file, in torrent file order (exact attribution
+    /// including pieces that straddle file boundaries).
+    public var fileVerifiedBytes: [Int64]
 
     public init(verifiedBytes: Int64 = 0, totalBytes: Int64 = 0,
                 peersConnected: Int = 0, peersSeen: Int = 0,
-                downloadSpeed: Double = 0, progress: Double = 0) {
+                downloadSpeed: Double = 0, progress: Double = 0,
+                fileVerifiedBytes: [Int64] = []) {
         self.verifiedBytes = verifiedBytes
         self.totalBytes = totalBytes
         self.peersConnected = peersConnected
         self.peersSeen = peersSeen
         self.downloadSpeed = downloadSpeed
         self.progress = progress
+        self.fileVerifiedBytes = fileVerifiedBytes
     }
 }
 
@@ -78,6 +83,11 @@ public actor TorrentSession {
     private var picker: PiecePicker
     private var layout: FileLayout
     private var disk: DiskWriter
+    /// Piece → file index, computed once from the layout.
+    private let pieceFile: [Int]
+    /// File index → download priority (1...4). Unprioritized files are
+    /// fetched after every prioritized one.
+    private var filePriorities: [Int: Int] = [:]
 
     private var state: TorrentState = .stopped
     private var paused = false
@@ -113,7 +123,26 @@ public actor TorrentSession {
                                   blockSize: settings.blockSize)
         self.layout = try! FileLayout(torrent: torrent, baseDirectory: settings.saveDirectory)
         self.disk = DiskWriter(layout: layout, pieceLength: torrent.pieceLength)
-        self.stats = TorrentStats(totalBytes: torrent.totalSize)
+
+        // Piece → file: each piece belongs to the file containing its first
+        // byte (a straddling piece is attributed to the file it starts in).
+        var pieceFile: [Int] = []
+        pieceFile.reserveCapacity(pieceCount)
+        for piece in 0..<pieceCount {
+            let offset = Int64(piece) * Int64(torrent.pieceLength)
+            pieceFile.append(layout.fileIndex(ofByteOffset: offset))
+        }
+        self.pieceFile = pieceFile
+
+        self.stats = TorrentStats(totalBytes: torrent.totalSize,
+                                  fileVerifiedBytes: [Int64](repeating: 0,
+                                                             count: layout.entries.count))
+        // Apply any priorities set before start(): the default order is
+        // ascending; priorities reorder it.
+        self.picker.setOrder(Self.priorityOrder(pieceCount: pieceCount,
+                                                verified: [],
+                                                priorities: [:],
+                                                pieceFile: pieceFile))
     }
 
     public static func parse(url: URL) throws -> TorrentFile {
@@ -200,6 +229,50 @@ public actor TorrentSession {
     }
 
     public func currentState() -> TorrentState { state }
+
+    // MARK: - File priorities
+
+    /// Set per-file download priorities (file index → 1...4). Pieces of
+    /// priority-1 files are fetched first, then 2, 3, 4, and finally every
+    /// unprioritized file — the picker's fetch order is rebuilt immediately,
+    /// so changes apply to a running download too. Invalid indices and
+    /// priorities outside 1...4 are ignored.
+    public func setFilePriorities(_ priorities: [Int: Int]) {
+        filePriorities = priorities.filter { entry in
+            entry.value >= 1 && entry.value <= 4
+                && entry.key >= 0 && entry.key < layout.entries.count
+        }
+        rebuildOrder()
+    }
+
+    /// Rebuild the picker's fetch order from the current priorities:
+    /// unverified pieces sorted by (file priority, piece index), with
+    /// unprioritized files (rank 5) after all prioritized ones.
+    private func rebuildOrder() {
+        picker.setOrder(Self.priorityOrder(pieceCount: picker.pieceCount,
+                                           verified: verifiedPieces,
+                                           priorities: filePriorities,
+                                           pieceFile: pieceFile))
+    }
+
+    /// Compute the fetch order: unverified pieces sorted by (file priority,
+    /// piece index), unprioritized files (rank 5) after all prioritized ones.
+    /// Pure — usable from `init` before the actor is fully initialized.
+    private static func priorityOrder(pieceCount: Int, verified: Set<Int>,
+                                      priorities: [Int: Int],
+                                      pieceFile: [Int]) -> [Int] {
+        func rank(of piece: Int) -> Int {
+            let file = pieceFile[piece]
+            return priorities[file] ?? 0 > 0 ? priorities[file]! : 5
+        }
+        let unverified = (0..<pieceCount).filter { !verified.contains($0) }
+        return unverified.sorted { a, b in
+            let ra = rank(of: a)
+            let rb = rank(of: b)
+            if ra != rb { return ra < rb }
+            return a < b
+        }
+    }
 
     // MARK: - Trackers
 
@@ -477,9 +550,11 @@ public actor TorrentSession {
             guard index >= 0, index < picker.pieceCount,
                   !verifiedPieces.contains(index) else { continue }
             verifiedPieces.insert(index)
-            picker.advancePast(index)
             stats.verifiedBytes += Int64(picker.pieceSize(of: index))
         }
+        // The order must exclude the resumed verified pieces — the frontier
+        // becomes the first unverified piece in the (priority) order.
+        rebuildOrder()
     }
 
     /// Persist the current verified-piece set so a later session can resume
@@ -496,6 +571,11 @@ public actor TorrentSession {
     private func finishDownload() async {
         guard state != .completed else { return }
         state = .completed
+        // Final stats so the UI shows 100% and full per-file progress
+        // immediately (the 1 Hz stats loop may be up to a second away).
+        stats.progress = 1
+        stats.fileVerifiedBytes = computeFileProgress()
+        emit(.stats(stats))
         emit(.state(.completed))
         fireAndForgetAnnounce(event: "completed")
         for (_, task) in peerTasks { task.cancel() }
@@ -525,8 +605,24 @@ public actor TorrentSession {
             stats.progress = stats.totalBytes > 0
                 ? Double(stats.verifiedBytes) / Double(stats.totalBytes)
                 : 1
+            stats.fileVerifiedBytes = computeFileProgress()
             emit(.stats(stats))
         }
+    }
+
+    /// Verified bytes per file, attributed exactly: a piece that straddles
+    /// two files contributes its overlap to each.
+    private func computeFileProgress() -> [Int64] {
+        var perFile = [Int64](repeating: 0, count: layout.entries.count)
+        for piece in verifiedPieces {
+            let start = Int64(piece) * Int64(torrent.pieceLength)
+            let end = min(start + Int64(torrent.pieceLength), torrent.totalSize)
+            guard start < end else { continue }
+            for span in layout.spans(forPieceRange: start..<end) {
+                perFile[span.file] += Int64(span.length)
+            }
+        }
+        return perFile
     }
 
     // MARK: - Helpers

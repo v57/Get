@@ -43,3 +43,10 @@ Plan: .hermes/plans/2026-08-16_174727-torrent-download-engine.md
 - [x] Engine: FileLayout.fileIndex(ofByteOffset:) (piece→file), PiecePicker order-based fetch (`setOrder`), TorrentSession.setFilePriorities + per-file progress in TorrentStats — commit eb3ed8b (+9 tests)
 - [x] UI: NavigationSplitView (downloads sidebar + detail pane), per-file progress bars, priority mode (click files → priority 1–4, others after) — commit 80ba45f
 - [x] Verified: full suite 136/136 (`swift test --no-parallel`), xcodebuild BUILD SUCCEEDED
+
+## Post-plan — Pause, trash, resume-on-relaunch (Aug 17)
+- [x] Engine: per-file pause (paused files drop out of fetch order; TorrentSession.setFilePaused) + non-destructive channel read cancel + idle-poll wake-up for pause/resume — commit cf520b9 (+2 E2E: file pause defers pieces, whole-download pause/resume)
+- [x] UI: pause button per sidebar download + per file in detail — commit 5084a0b
+- [x] Engine: FileLayout.rootURL (Trash unit) + TorrentSession.dataRootURL + ResumeState.fileURL(infoHashHex:) — commit dee6f48 (+3 tests)
+- [x] UI: trash button (detail toolbar + sidebar context menu; moves files to Trash, drops resume state) + auto-resume on relaunch (persists .torrent copy in Application Support/Get/Torrents, store init reopens them) — commit 7a16035; verified via launch cycle: copy persisted → relaunch logged "Resuming 1 saved download(s)"
+- [x] Verified: full suite 141/141 (`swift test --no-parallel`), xcodebuild BUILD SUCCEEDED

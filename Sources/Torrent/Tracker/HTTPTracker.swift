@@ -315,6 +315,7 @@ public enum HTTPTracker {
             if !isDefault { host += ":\(port)" }
         }
         request += "Host: \(host)\r\n"
+        request += "User-Agent: Get/1.0\r\n"
         request += "Accept: */*\r\n"
         request += "Connection: close\r\n"
         request += "\r\n"

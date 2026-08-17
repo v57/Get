@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 // MARK: - Public API
 
@@ -14,6 +15,10 @@ public struct TorrentSettings: Sendable, Equatable {
     public var maxPeers: Int = 30
     public var pipelinePerPeer: Int = 4
     public var blockSize: Int = 16 * 1024
+    /// The local port advertised to trackers. Get is zero-upload and never
+    /// accepts inbound connections, so peers won't reach it — but trackers
+    /// validate that `port` is a real port, so it must be non-zero.
+    public var listenPort: UInt16 = 6881
 
     public init() {
         saveDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -73,6 +78,8 @@ public enum PeerEvent: Sendable {
 /// piece fetching, SHA-1 verification, and disk writes. UI observes via
 /// `events` (`AsyncStream<TorrentEvent>`).
 public actor TorrentSession {
+    public static let log = Logger(subsystem: "dev.v57.get", category: "engine")
+
     private let torrent: TorrentFile
     private let settings: TorrentSettings
     private let ourPeerID: Data
@@ -189,6 +196,7 @@ public actor TorrentSession {
 
         let peers = await announceStarted()
         announcedPeers = peers
+        Self.log.info("announce returned \(peers.count, privacy: .public) peer(s)")
         spawnPeerTasks(for: peers)
 
         if let interval = lastAnnounceInterval {
@@ -310,7 +318,7 @@ public actor TorrentSession {
         TrackerAnnounceParams(
             infoHash: torrent.infoHash,
             peerID: ourPeerID,
-            port: 0,
+            port: settings.listenPort,
             uploaded: 0,
             downloaded: stats.verifiedBytes,
             left: max(0, torrent.totalSize - stats.verifiedBytes),
@@ -326,12 +334,15 @@ public actor TorrentSession {
         var interval: Int?
         for url in announceURLs {
             let params = announceParams(event: "started")
-            if let response = try? await HTTPTracker.announce(url: url, params: params, timeout: .seconds(15)) {
+            do {
+                let response = try await HTTPTracker.announce(url: url, params: params, timeout: .seconds(15))
+                Self.log.info("announce OK from \(url.host ?? "", privacy: .public): \(response.peers.count, privacy: .public) peers, \(response.seeders ?? -1, privacy: .public) seeds, \(response.leechers ?? -1, privacy: .public) leechers")
                 peers.append(contentsOf: response.peers)
                 if interval == nil { interval = response.interval }
-            } else if let response = try? await UDPTracker.announce(url: url, params: params, timeout: .seconds(15)) {
-                peers.append(contentsOf: response.peers)
-                if interval == nil { interval = response.interval }
+            } catch {
+                if let udp = try? await UDPTracker.announce(url: url, params: params, timeout: .seconds(15)) {
+                    peers.append(contentsOf: udp.peers)
+                }
             }
         }
         lastAnnounceInterval = interval
@@ -390,6 +401,7 @@ public actor TorrentSession {
                                         connectTimeout: .seconds(15),
                                         readTimeout: .seconds(90))
         peers[key] = connection
+        Self.log.info("connecting to \(host, privacy: .public):\(port)")
         var choked = true
         var sentOurBitfield = false
         var loggedNoUpload = false
@@ -438,8 +450,10 @@ public actor TorrentSession {
                 switch message {
                 case .choke:
                     choked = true
+                    Self.log.info("\(host, privacy: .public):\(port) choked (idle=\(idle, privacy: .public))")
                 case .unchoke:
                     choked = false
+                    Self.log.info("\(host, privacy: .public):\(port) unchoked")
                 case .bitfield(let bits):
                     picker.setAvailable(piecesFromBitfield(bits), on: key)
                     if !sentOurBitfield {

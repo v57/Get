@@ -25,10 +25,16 @@ public struct ResumeState: Codable, Sendable, Equatable {
     /// The on-disk location of this torrent's resume state:
     /// `~/Library/Application Support/Get/<infohash-hex>.state`.
     public static func fileURL(infoHash: Data) -> URL {
+        fileURL(infoHashHex: hex(infoHash))
+    }
+
+    /// The on-disk location of this torrent's resume state, given the
+    /// infohash already formatted as hex (as the app keys downloads by).
+    public static func fileURL(infoHashHex: String) -> URL {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory,
                                                  in: .userDomainMask).first!
             .appendingPathComponent("Get", isDirectory: true)
-        return directory.appendingPathComponent("\(hex(infoHash)).state")
+        return directory.appendingPathComponent("\(infoHashHex).state")
     }
 
     /// Load the persisted state for `infoHash`, or nil when the file is

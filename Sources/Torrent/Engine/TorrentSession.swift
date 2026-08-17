@@ -233,6 +233,11 @@ public actor TorrentSession {
 
     public func currentState() -> TorrentState { state }
 
+    /// The top-level thing this download owns on disk (the single file, or
+    /// the `<name>/` directory for multi-file torrents) — the unit to move
+    /// to Trash when the download is deleted.
+    public func dataRootURL() -> URL { layout.rootURL }
+
     // MARK: - File priorities
 
     /// Set per-file download priorities (file index → 1...4). Pieces of

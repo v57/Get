@@ -53,6 +53,34 @@ private func url(_ base: URL, _ components: String...) -> URL {
     #expect(layout.fileEnds == [4, 10, 10])
 }
 
+// MARK: - rootURL (Trash unit)
+
+@Test func rootURLIsTheFileForSingleFileTorrents() throws {
+    let content = Data("single-file torrent payload".utf8)
+    let (_, torrent, _) = try SyntheticTorrent.make(data: content, pieceLength: 16, name: "solo.bin")
+    let base = makeTempDir("FileLayoutRootSingle")
+    defer { try? FileManager.default.removeItem(at: base) }
+
+    let layout = try FileLayout(torrent: torrent, baseDirectory: base)
+    #expect(layout.rootURL == url(base, "solo.bin"),
+            "single-file root should be the file itself")
+}
+
+@Test func rootURLIsTheNameDirectoryForMultiFileTorrents() throws {
+    let files: [(path: [String], data: Data)] = [
+        (["a.txt"], Data("AAAA".utf8)),
+        (["sub", "b.txt"], Data("BBBBBB".utf8)),
+    ]
+    let (_, torrent, _) = try SyntheticTorrent.make(data: Data(), pieceLength: 4,
+                                                    name: "multi", files: files)
+    let base = makeTempDir("FileLayoutRootMulti")
+    defer { try? FileManager.default.removeItem(at: base) }
+
+    let layout = try FileLayout(torrent: torrent, baseDirectory: base)
+    #expect(layout.rootURL == url(base, "multi"),
+            "multi-file root should be the <name>/ directory")
+}
+
 // MARK: - Piece → (file, offset, length) spans
 
 /// Content: file0 = 100 bytes, file1 = 100 bytes, pieceLength 64.

@@ -80,6 +80,14 @@ public struct FileLayout: Sendable {
         self.fileEnds = ends
     }
 
+    /// The top-level thing this torrent owns on disk: the single file itself
+    /// for single-file torrents, the `<name>/` directory for multi-file ones.
+    /// This is the natural unit for "move the download to Trash".
+    public var rootURL: URL {
+        guard let first = entries.first else { return baseDirectory }
+        return baseDirectory.appendingPathComponent(first.path[0])
+    }
+
     /// Map a byte range of the torrent's content stream to disk segments.
     ///
     /// Returns one `(file, offset, length)` tuple per file the range touches,

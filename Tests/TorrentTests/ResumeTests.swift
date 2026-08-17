@@ -65,6 +65,13 @@ private func removeResumeState(infoHash: Data) {
     #expect(ResumeState.fileURL(infoHash: other) != url, "different infohashes share a state file")
 }
 
+@Test func testResumeStateFileURLAcceptsHex() {
+    let hex = (0..<20).map { String(format: "%02x", $0) }.joined()
+    let fromData = ResumeState.fileURL(infoHash: Data((0..<20).map { UInt8($0) }))
+    #expect(ResumeState.fileURL(infoHashHex: hex) == fromData,
+            "hex and Data forms disagree on the state file URL")
+}
+
 @Test func testResumeStateMissingFileLoadsNil() {
     let infoHash = Data((0..<20).map { UInt8(0xFE - $0) })
     removeResumeState(infoHash: infoHash)

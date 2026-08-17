@@ -42,6 +42,9 @@ final class DownloadStore {
         var error: String?
         /// The torrent's files (empty for non-torrent downloads).
         var files: [DownloadFileItem] = []
+        /// Set when the download finishes and its files are moved out of
+        /// `Downloading` into `Downloads` — the location Trash should use.
+        var finalURL: URL?
     }
 
     private(set) var items: [DownloadItem] = []
@@ -51,6 +54,17 @@ final class DownloadStore {
 
     private var sessions: [String: TorrentSession] = [:]
     private var eventTasks: [String: Task<Void, Never>] = [:]
+
+    /// `~/Downloads` — where finished downloads end up.
+    private static var downloadsRoot: URL {
+        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+    }
+
+    /// `~/Downloads/Downloading` — where active downloads stage until they
+    /// finish, then are moved to `downloadsRoot`.
+    private static var activeDirectory: URL {
+        downloadsRoot.appendingPathComponent("Downloading", isDirectory: true)
+    }
 
     /// Where copies of active `.torrent` files live so downloads can be
     /// resumed on relaunch: `~/Library/Application Support/Get/Torrents/`.
@@ -74,6 +88,18 @@ final class DownloadStore {
         if !files.isEmpty {
             Self.log.info("Resuming \(files.count) saved download(s)")
         }
+        Self.removeActiveDirectoryIfEmpty()
+    }
+
+    /// Remove `~/Downloads/Downloading` when it's empty (e.g. a previous run
+    /// crashed after the last download was moved out). Harmless no-op when
+    /// it has content or doesn't exist.
+    private static func removeActiveDirectoryIfEmpty() {
+        let dir = activeDirectory
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        guard (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+            .isEmpty == true else { return }
+        try? FileManager.default.removeItem(at: dir)
     }
 
     /// Open a `.torrent` file from any source (file importer, drag & drop,
@@ -99,7 +125,12 @@ final class DownloadStore {
         // Keep a copy so the download can be resumed on relaunch.
         persistTorrentCopy(from: url, id: id)
 
-        let session = TorrentSession(torrent: torrent, settings: TorrentSettings())
+        var settings = TorrentSettings()
+        // Active downloads stage in ~/Downloads/Downloading; on completion
+        // they move to ~/Downloads.
+        settings.saveDirectory = Self.activeDirectory
+
+        let session = TorrentSession(torrent: torrent, settings: settings)
         sessions[id] = session
         let files = torrent.files.enumerated().map { index, file in
             DownloadFileItem(index: index,
@@ -155,14 +186,25 @@ final class DownloadStore {
         }
         await session.cancel()
 
+        // Target the moved-to-Downloads location if the download finished;
+        // otherwise the still-staged location under Downloading.
+        let stagedRoot = await session.dataRootURL()
+        let root: URL
+        if let index = items.firstIndex(where: { $0.id == itemID }),
+           let finalURL = items[index].finalURL {
+            root = finalURL
+        } else {
+            root = stagedRoot
+        }
+
         // Move the download's files to the Trash (best effort — a download
         // that never wrote anything has nothing to trash).
-        let root = await session.dataRootURL()
         try? FileManager.default.trashItem(at: root, resultingItemURL: nil)
 
         items.removeAll { $0.id == itemID }
         removeTorrentCopy(id: itemID)
         try? FileManager.default.removeItem(at: ResumeState.fileURL(infoHashHex: itemID))
+        Self.removeActiveDirectoryIfEmpty()
     }
 
     /// Pause the whole download (stops requesting; in-flight blocks finish).
@@ -271,6 +313,9 @@ final class DownloadStore {
             if case .failed(let message) = state {
                 items[index].error = message
             }
+            if state == .completed {
+                finalizeCompletedDownload(itemID: id, index: index)
+            }
         case .stats(let stats):
             items[index].progress = stats.progress
             items[index].speed = Self.formatSpeed(stats.downloadSpeed)
@@ -284,6 +329,42 @@ final class DownloadStore {
             items[index].error = message
         case .pieceVerified, .peer:
             break
+        }
+    }
+
+    /// Move a finished download's files from `~/Downloads/Downloading` into
+    /// `~/Downloads`, drop its resume state/persisted torrent (a completed
+    /// download must not be re-fetched on relaunch), and remove the staging
+    /// directory when it's now empty.
+    private func finalizeCompletedDownload(itemID: String, index: Int) {
+        guard let session = sessions[itemID] else { return }
+        Task {
+            let from = await session.dataRootURL()
+            let to = Self.downloadsRoot.appendingPathComponent(from.lastPathComponent)
+
+            // Only move when the download is still staged (not already there).
+            if from.deletingLastPathComponent().path != Self.downloadsRoot.path,
+               FileManager.default.fileExists(atPath: from.path) {
+                do {
+                    try FileManager.default.moveItem(at: from, to: to)
+                } catch {
+                    Self.log.error("Couldn't move \(from.lastPathComponent) to Downloads: \(error.localizedDescription)")
+                    return
+                }
+            }
+
+            // Record the final location so Trash targets the moved files.
+            if let i = items.firstIndex(where: { $0.id == itemID }) {
+                items[i].finalURL = to
+            }
+
+            // A finished download is no longer "active": drop its resume
+            // state and persisted copy so relaunch won't re-add it.
+            removeTorrentCopy(id: itemID)
+            try? FileManager.default.removeItem(at: ResumeState.fileURL(infoHashHex: itemID))
+
+            Self.removeActiveDirectoryIfEmpty()
+            Self.log.info("Moved \(to.lastPathComponent) to Downloads")
         }
     }
 

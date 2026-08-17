@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 import Torrent
 
 /// Owns the torrent sessions backing the UI. Holds one `DownloadItem` per
@@ -8,6 +9,7 @@ import Torrent
 @MainActor
 @Observable
 final class DownloadStore {
+    private static let log = Logger(subsystem: "dev.v57.get", category: "store")
 
     /// One file inside a torrent download.
     struct DownloadFileItem: Identifiable {
@@ -50,6 +52,30 @@ final class DownloadStore {
     private var sessions: [String: TorrentSession] = [:]
     private var eventTasks: [String: Task<Void, Never>] = [:]
 
+    /// Where copies of active `.torrent` files live so downloads can be
+    /// resumed on relaunch: `~/Library/Application Support/Get/Torrents/`.
+    private static var torrentsDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory,
+                                 in: .userDomainMask).first!
+            .appendingPathComponent("Get/Torrents", isDirectory: true)
+    }
+
+    init() {
+        // Reopen every torrent that was active in a previous run. Sessions
+        // pick up the persisted resume state automatically (verified pieces
+        // are skipped), so interrupted downloads continue on relaunch.
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: Self.torrentsDirectory, includingPropertiesForKeys: nil)) ?? []
+        for url in files where url.pathExtension.lowercased() == "torrent" {
+            // Errors (corrupt copy, missing data) must not spam the launch;
+            // a failed restore is just a skipped download.
+            Task { try? await openTorrent(url: url) }
+        }
+        if !files.isEmpty {
+            Self.log.info("Resuming \(files.count) saved download(s)")
+        }
+    }
+
     /// Open a `.torrent` file from any source (file importer, drag & drop,
     /// "Open With…"). Starts the download; failures surface as `lastError`.
     func open(url: URL) async {
@@ -69,6 +95,9 @@ final class DownloadStore {
 
         // Already known (or still listed after cancel) — don't duplicate.
         guard !items.contains(where: { $0.id == id }) else { return }
+
+        // Keep a copy so the download can be resumed on relaunch.
+        persistTorrentCopy(from: url, id: id)
 
         let session = TorrentSession(torrent: torrent, settings: TorrentSettings())
         sessions[id] = session
@@ -95,19 +124,45 @@ final class DownloadStore {
         }
     }
 
-    /// Stop a download and clean up its session.
+    /// Stop a download and clean up its session. The files stay on disk and
+    /// the item stays listed (as `.stopped`); the persisted `.torrent` copy
+    /// is removed so it does NOT come back on relaunch.
     func cancel(itemID: String) {
         eventTasks[itemID]?.cancel()
         eventTasks[itemID] = nil
 
         guard let session = sessions.removeValue(forKey: itemID) else { return }
         Task { await session.cancel() }
+        removeTorrentCopy(id: itemID)
 
         if let index = items.firstIndex(where: { $0.id == itemID }) {
             items[index].state = .stopped
             items[index].speed = ""
             items[index].peers = 0
         }
+    }
+
+    /// Delete a download: stop the session, remove the item, move the
+    /// downloaded files to the Trash, and drop its resume state + persisted
+    /// `.torrent` copy so nothing comes back on relaunch.
+    func trash(itemID: String) async {
+        eventTasks[itemID]?.cancel()
+        eventTasks[itemID] = nil
+
+        guard let session = sessions.removeValue(forKey: itemID) else {
+            items.removeAll { $0.id == itemID }
+            return
+        }
+        await session.cancel()
+
+        // Move the download's files to the Trash (best effort — a download
+        // that never wrote anything has nothing to trash).
+        let root = await session.dataRootURL()
+        try? FileManager.default.trashItem(at: root, resultingItemURL: nil)
+
+        items.removeAll { $0.id == itemID }
+        removeTorrentCopy(id: itemID)
+        try? FileManager.default.removeItem(at: ResumeState.fileURL(infoHashHex: itemID))
     }
 
     /// Pause the whole download (stops requesting; in-flight blocks finish).
@@ -182,6 +237,28 @@ final class DownloadStore {
               items[index].files.indices.contains(fileIndex) else { return }
         setFilePaused(!items[index].files[fileIndex].isPaused,
                       fileIndex: fileIndex, itemID: itemID)
+    }
+
+    // MARK: - Persistence (resume on relaunch)
+
+    /// Copy a `.torrent` file into the app's library so the download can be
+    /// resumed after a relaunch. Best effort — a failed copy just means no
+    /// auto-resume for this torrent.
+    private func persistTorrentCopy(from url: URL, id: String) {
+        do {
+            let data = try Data(contentsOf: url)
+            try FileManager.default.createDirectory(at: Self.torrentsDirectory,
+                                                    withIntermediateDirectories: true)
+            try data.write(to: Self.torrentsDirectory
+                .appendingPathComponent("\(id).torrent"), options: .atomic)
+        } catch {
+            // Best effort: skip auto-resume for this torrent.
+        }
+    }
+
+    private func removeTorrentCopy(id: String) {
+        try? FileManager.default.removeItem(
+            at: Self.torrentsDirectory.appendingPathComponent("\(id).torrent"))
     }
 
     // MARK: - Events

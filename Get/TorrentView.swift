@@ -102,10 +102,10 @@ struct TorrentView: View {
     private var sidebar: some View {
         List(selection: $selectedID) {
             ForEach(store.items) { item in
-                SidebarRow(item: item) {
-                    store.togglePause(itemID: item.id)
-                }
-                .tag(item.id)
+                SidebarRow(item: item,
+                           onTogglePause: { store.togglePause(itemID: item.id) },
+                           onTrash: { Task { await store.trash(itemID: item.id) } })
+                    .tag(item.id)
             }
         }
         .navigationTitle("Downloads")
@@ -125,6 +125,7 @@ struct TorrentView: View {
 private struct SidebarRow: View {
     let item: DownloadStore.DownloadItem
     let onTogglePause: () -> Void
+    let onTrash: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -160,6 +161,9 @@ private struct SidebarRow: View {
                 Button(item.state == .paused ? "Resume" : "Pause") {
                     onTogglePause()
                 }
+            }
+            Button("Move to Trash", role: .destructive) {
+                onTrash()
             }
         }
     }
@@ -209,6 +213,14 @@ private struct TorrentDetailView: View {
                         store.cancel(itemID: itemID)
                     }
                 }
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    Task { await store.trash(itemID: itemID) }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .help("Move download to Trash")
             }
         }
     }

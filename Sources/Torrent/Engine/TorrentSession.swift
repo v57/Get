@@ -40,6 +40,13 @@ public struct TorrentStats: Sendable, Equatable {
     public var totalBytes: Int64
     public var peersConnected: Int
     public var peersSeen: Int
+    /// Peers currently connected that hold every piece (seeders). Derived
+    /// from each peer's announced bitfield.
+    public var seedersConnected: Int
+    /// Seeders/leechers reported by the tracker at the last successful
+    /// announce, when the tracker provides them.
+    public var trackerSeeders: Int?
+    public var trackerLeechers: Int?
     public var downloadSpeed: Double
     public var progress: Double
     /// Verified bytes per file, in torrent file order (exact attribution
@@ -48,12 +55,17 @@ public struct TorrentStats: Sendable, Equatable {
 
     public init(verifiedBytes: Int64 = 0, totalBytes: Int64 = 0,
                 peersConnected: Int = 0, peersSeen: Int = 0,
+                seedersConnected: Int = 0,
+                trackerSeeders: Int? = nil, trackerLeechers: Int? = nil,
                 downloadSpeed: Double = 0, progress: Double = 0,
                 fileVerifiedBytes: [Int64] = []) {
         self.verifiedBytes = verifiedBytes
         self.totalBytes = totalBytes
         self.peersConnected = peersConnected
         self.peersSeen = peersSeen
+        self.seedersConnected = seedersConnected
+        self.trackerSeeders = trackerSeeders
+        self.trackerLeechers = trackerLeechers
         self.downloadSpeed = downloadSpeed
         self.progress = progress
         self.fileVerifiedBytes = fileVerifiedBytes
@@ -112,6 +124,9 @@ public actor TorrentSession {
     private var statsTask: Task<Void, Never>?
     private var announcedPeers: [TrackerPeer] = []
     private var bytesAtLastTick: Int64 = 0
+    /// Seed/leech counts from the last successful announce (tracker-reported).
+    private var trackerSeeders: Int?
+    private var trackerLeechers: Int?
 
     public init(torrent: TorrentFile, settings: TorrentSettings) {
         self.torrent = torrent
@@ -339,6 +354,10 @@ public actor TorrentSession {
                 Self.log.info("announce OK from \(url.host ?? "", privacy: .public): \(response.peers.count, privacy: .public) peers, \(response.seeders ?? -1, privacy: .public) seeds, \(response.leechers ?? -1, privacy: .public) leechers")
                 peers.append(contentsOf: response.peers)
                 if interval == nil { interval = response.interval }
+                if response.seeders != nil || response.leechers != nil {
+                    trackerSeeders = response.seeders ?? 0
+                    trackerLeechers = response.leechers ?? 0
+                }
             } catch {
                 if let udp = try? await UDPTracker.announce(url: url, params: params, timeout: .seconds(15)) {
                     peers.append(contentsOf: udp.peers)
@@ -660,6 +679,12 @@ public actor TorrentSession {
                 ? Double(stats.verifiedBytes) / Double(stats.totalBytes)
                 : 1
             stats.fileVerifiedBytes = computeFileProgress()
+            // A connected peer is a seeder if its announced set is complete.
+            stats.seedersConnected = picker.peerHas.values
+                .filter { $0.count >= picker.pieceCount }
+                .count
+            stats.trackerSeeders = trackerSeeders
+            stats.trackerLeechers = trackerLeechers
             emit(.stats(stats))
         }
     }

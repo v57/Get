@@ -235,15 +235,29 @@ private struct TorrentDetailView: View {
                 if !item.speed.isEmpty {
                     Text(item.speed)
                 }
-                if item.peers > 0 {
-                    Text("· \(item.peers) peers")
-                }
                 Spacer()
                 Text("\(Int(item.progress * 100))%")
                     .font(.title3.weight(.semibold).monospacedDigit())
             }
             ProgressView(value: item.progress)
                 .controlSize(.large)
+            // Detailed status: connected peers, seeders, tracker swarm counts.
+            HStack(spacing: 12) {
+                LabeledContent("Peers") {
+                    Text("\(item.peers)").monospacedDigit()
+                }
+                LabeledContent("Seeds (connected)") {
+                    Text("\(item.seeders)").monospacedDigit()
+                }
+                if let s = item.trackerSeeders, let l = item.trackerLeechers {
+                    LabeledContent("Swarm (tracker)") {
+                        Text("\(s) seeds · \(l) leechers").monospacedDigit()
+                    }
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
             if let error = item.error {
                 Text(error)
                     .font(.caption)

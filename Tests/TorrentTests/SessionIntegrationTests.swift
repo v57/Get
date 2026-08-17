@@ -370,6 +370,55 @@ private func waitForState(_ target: TorrentState,
     #expect(try Data(contentsOf: dir.appendingPathComponent("whole.bin")) == content)
 }
 
+@Test func testStatsReportConnectedSeeders() async throws {
+    // The FakeSeeder greets with an all-ones bitfield (it has every piece), so
+    // once it connects the session's stats must count it as a seeder. We wait
+    // for the peer-connected event, then for a stats tick while it's attached.
+    let content = makeContent(512 * 1024)   // 32 pieces @ 16 KiB
+    let seeder = try FakeSeeder(content: content, pieceLength: 16 * 1024,
+                                infoHash: [UInt8](repeating: 0xAB, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8),
+                                serveDelay: .milliseconds(40))
+    defer { seeder.stop() }
+    let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+    let bundle = try SyntheticTorrent.make(data: content, pieceLength: 16 * 1024,
+                                           name: "seeds.bin",
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+    let dir = try makeTempDir("seeds")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+    settings.pipelinePerPeer = 2
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    try await session.start()
+
+    // Phase 1: wait until a peer is connected.
+    var connected = false
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(10))
+    for await event in events {
+        if case .peer(.connected) = event { connected = true; break }
+        if clock.now > deadline { break }
+    }
+    #expect(connected, "no peer ever connected")
+
+    // Phase 2: after connection, a stats tick must count that peer as a seeder.
+    var sawSeeder = false
+    let deadline2 = clock.now.advanced(by: .seconds(10))
+    for await event in events {
+        if case .stats(let stats) = event, stats.seedersConnected > 0 {
+            sawSeeder = true
+            break
+        }
+        if clock.now > deadline2 { break }
+    }
+    #expect(sawSeeder, "connected full-bitfield peer was not counted as a seeder")
+}
+
 @Test func testCancelMidDownload() async throws {
     // 2 MiB with a per-block serve delay so the download takes ~0.5s and the
     // cancel lands mid-flight.

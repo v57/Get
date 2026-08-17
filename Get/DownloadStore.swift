@@ -39,6 +39,11 @@ final class DownloadStore {
         var progress: Double = 0
         var speed: String = ""
         var peers: Int = 0
+        /// Connected peers that hold every piece.
+        var seeders: Int = 0
+        /// Tracker-reported seeders/leechers (optional, latest announce).
+        var trackerSeeders: Int?
+        var trackerLeechers: Int?
         var error: String?
         /// The torrent's files (empty for non-torrent downloads).
         var files: [DownloadFileItem] = []
@@ -312,14 +317,29 @@ final class DownloadStore {
             items[index].state = state
             if case .failed(let message) = state {
                 items[index].error = message
+                Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
+            } else {
+                Self.log.info("[\(id, privacy: .public)] state -> \(state.label, privacy: .public)")
             }
             if state == .completed {
                 finalizeCompletedDownload(itemID: id, index: index)
+            }
+        case .peer(let peerEvent):
+            switch peerEvent {
+            case .connected(let host):
+                Self.log.info("[\(id, privacy: .public)] peer connected: \(host, privacy: .public)")
+            case .disconnected(let host):
+                Self.log.info("[\(id, privacy: .public)] peer disconnected: \(host, privacy: .public)")
+            case .dropped(let host):
+                Self.log.info("[\(id, privacy: .public)] peer dropped: \(host, privacy: .public)")
             }
         case .stats(let stats):
             items[index].progress = stats.progress
             items[index].speed = Self.formatSpeed(stats.downloadSpeed)
             items[index].peers = stats.peersConnected
+            items[index].seeders = stats.seedersConnected
+            items[index].trackerSeeders = stats.trackerSeeders
+            items[index].trackerLeechers = stats.trackerLeechers
             if stats.fileVerifiedBytes.count == items[index].files.count {
                 for fileIndex in items[index].files.indices {
                     items[index].files[fileIndex].verifiedBytes = stats.fileVerifiedBytes[fileIndex]
@@ -327,8 +347,9 @@ final class DownloadStore {
             }
         case .error(let message):
             items[index].error = message
-        case .pieceVerified, .peer:
-            break
+            Self.log.error("[\(id, privacy: .public)] engine error: \(message, privacy: .public)")
+        case .pieceVerified(let piece):
+            Self.log.info("[\(id, privacy: .public)] piece \(piece, privacy: .public) verified")
         }
     }
 

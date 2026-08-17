@@ -88,6 +88,8 @@ public actor TorrentSession {
     /// File index → download priority (1...4). Unprioritized files are
     /// fetched after every prioritized one.
     private var filePriorities: [Int: Int] = [:]
+    /// Files whose pieces must not be fetched (until resumed).
+    private var pausedFiles: Set<Int> = []
 
     private var state: TorrentState = .stopped
     private var paused = false
@@ -142,7 +144,8 @@ public actor TorrentSession {
         self.picker.setOrder(Self.priorityOrder(pieceCount: pieceCount,
                                                 verified: [],
                                                 priorities: [:],
-                                                pieceFile: pieceFile))
+                                                pieceFile: pieceFile,
+                                                pausedFiles: []))
     }
 
     public static func parse(url: URL) throws -> TorrentFile {
@@ -245,33 +248,53 @@ public actor TorrentSession {
         rebuildOrder()
     }
 
-    /// Rebuild the picker's fetch order from the current priorities:
-    /// unverified pieces sorted by (file priority, piece index), with
-    /// unprioritized files (rank 5) after all prioritized ones.
+    /// Pause or resume one file: paused files' pieces drop out of the fetch
+    /// order entirely (in-flight pieces still complete), so nothing more is
+    /// downloaded for them until they're resumed. Applies to a running
+    /// download immediately.
+    public func setFilePaused(_ paused: Bool, fileIndex: Int) {
+        guard fileIndex >= 0, fileIndex < layout.entries.count else { return }
+        if paused {
+            pausedFiles.insert(fileIndex)
+        } else {
+            pausedFiles.remove(fileIndex)
+        }
+        rebuildOrder()
+    }
+
+    /// Rebuild the picker's fetch order from the current priorities and
+    /// paused files: unverified pieces sorted by (file priority, piece
+    /// index), with unprioritized files (rank 5) after all prioritized ones;
+    /// pieces of paused files are excluded.
     private func rebuildOrder() {
         picker.setOrder(Self.priorityOrder(pieceCount: picker.pieceCount,
                                            verified: verifiedPieces,
                                            priorities: filePriorities,
-                                           pieceFile: pieceFile))
+                                           pieceFile: pieceFile,
+                                           pausedFiles: pausedFiles))
     }
 
     /// Compute the fetch order: unverified pieces sorted by (file priority,
-    /// piece index), unprioritized files (rank 5) after all prioritized ones.
-    /// Pure — usable from `init` before the actor is fully initialized.
+    /// piece index), unprioritized files (rank 5) after all prioritized ones,
+    /// paused files excluded. Pure — usable from `init` before the actor is
+    /// fully initialized.
     private static func priorityOrder(pieceCount: Int, verified: Set<Int>,
                                       priorities: [Int: Int],
-                                      pieceFile: [Int]) -> [Int] {
+                                      pieceFile: [Int],
+                                      pausedFiles: Set<Int>) -> [Int] {
         func rank(of piece: Int) -> Int {
             let file = pieceFile[piece]
             return priorities[file] ?? 0 > 0 ? priorities[file]! : 5
         }
         let unverified = (0..<pieceCount).filter { !verified.contains($0) }
-        return unverified.sorted { a, b in
-            let ra = rank(of: a)
-            let rb = rank(of: b)
-            if ra != rb { return ra < rb }
-            return a < b
-        }
+        return unverified
+            .filter { !pausedFiles.contains(pieceFile[$0]) }
+            .sorted { a, b in
+                let ra = rank(of: a)
+                let rb = rank(of: b)
+                if ra != rb { return ra < rb }
+                return a < b
+            }
     }
 
     // MARK: - Trackers
@@ -394,7 +417,19 @@ public actor TorrentSession {
                 }
                 if case .completed = state { break }
 
-                let message = try await connection.receiveMessage()
+                // When this peer has nothing in flight and nothing left to
+                // request (paused, or all remaining pieces belong to paused
+                // files), don't block on receive forever — poll with a short
+                // timeout so resume/priority changes are picked up promptly.
+                let idle = picker.pending[key, default: []].isEmpty
+                let message: WireMessage?
+                if idle {
+                    message = try await connection.receiveMessageOrIdle(timeout: .milliseconds(500))
+                } else {
+                    message = try await connection.receiveMessage()
+                }
+                guard let message else { continue }  // idle poll timed out; re-check
+
                 switch message {
                 case .choke:
                     choked = true

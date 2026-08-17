@@ -261,6 +261,63 @@ private func waitForState(_ target: TorrentState,
             "per-file progress is wrong: \(finalFileProgress)")
 }
 
+@Test func testFilePauseDefersItsPieces() async throws {
+    // File A = pieces 0-2, File B = pieces 3-5. Pausing B must keep its
+    // pieces out of the fetch order until it's resumed.
+    let fileA = makeContent(48 * 1024)
+    let fileB = makeContent(48 * 1024)
+    let content = fileA + fileB
+    let files: [(path: [String], data: Data)] = [
+        (["a.bin"], fileA),
+        (["b.bin"], fileB),
+    ]
+    let seeder = try FakeSeeder(content: content, pieceLength: 16 * 1024,
+                                infoHash: [UInt8](repeating: 0xAB, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8))
+    defer { seeder.stop() }
+    let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+    let bundle = try SyntheticTorrent.make(data: Data(), pieceLength: 16 * 1024,
+                                           name: "pause", files: files,
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+    let dir = try makeTempDir("pause")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    // Pause b.bin (file index 1) before starting.
+    await session.setFilePaused(true, fileIndex: 1)
+    try await session.start()
+
+    // While B is paused, only A's pieces may be requested.
+    var verified = 0
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(10))
+    for await event in events {
+        if case .pieceVerified = event {
+            verified += 1
+            if verified >= 3 { break }  // all of A is done
+        }
+        if clock.now > deadline { break }
+    }
+    #expect(verified == 3, "file A did not complete while B was paused: \(verified)")
+    let whilePaused = seeder.requestedPieces
+    #expect(!whilePaused.contains(3), "paused file's pieces were requested: \(whilePaused)")
+    #expect(!whilePaused.contains(4) && !whilePaused.contains(5),
+            "paused file's pieces were requested: \(whilePaused)")
+
+    // Resume B and let the download finish.
+    await session.setFilePaused(false, fileIndex: 1)
+    let completed = await waitForState(.completed, in: events, timeout: .seconds(15))
+    #expect(completed, "download did not complete after resume")
+
+    #expect(try Data(contentsOf: dir.appendingPathComponent("pause/a.bin")) == fileA)
+    #expect(try Data(contentsOf: dir.appendingPathComponent("pause/b.bin")) == fileB)
+}
+
 @Test func testCancelMidDownload() async throws {
     // 2 MiB with a per-block serve delay so the download takes ~0.5s and the
     // cancel lands mid-flight.

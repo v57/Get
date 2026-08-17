@@ -163,6 +163,38 @@ public actor PeerConnection {
         }
     }
 
+    /// Read one wire message, but give up after `timeout` of silence and
+    /// return nil instead of throwing — the connection stays open and any
+    /// bytes that arrive later are buffered for the next read (a cancelled
+    /// frame read never consumes partial bytes, so the stream stays
+    /// aligned). Used by the peer loop to poll while idle so order changes
+    /// (paused-file resume, new priorities) are noticed promptly.
+    public func receiveMessageOrIdle(timeout: Duration) async throws -> WireMessage? {
+        guard !closed, let channel else { throw PeerConnectionError.closed }
+        do {
+            return try await withThrowingTaskGroup(of: WireMessage?.self) { group in
+                group.addTask { try await self.readFrame(over: channel) }
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    return nil
+                }
+                guard let message = try await group.next() else {
+                    throw PeerConnectionError.closed
+                }
+                group.cancelAll()
+                return message
+            }
+        } catch let error as WireCodecError {
+            throw error
+        } catch let error as PeerConnectionError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw PeerConnectionError.closed
+        }
+    }
+
     /// Cancel the connection. Interrupts any in-flight `send`/`receiveMessage`.
     public func close() async {
         closed = true
@@ -250,23 +282,25 @@ private enum ChannelError: Error {
 
 /// An `MSEByteChannel` over an outbound `NWConnection`. `read` returns exactly
 /// `count` bytes, buffering partial receives. Reads are cancellation-
-/// cooperative: cancelling the awaiting task cancels the connection and
-/// resumes the read with `CancellationError` (the MSE timeout path relies on
-/// this), and `close()` unblocks any in-flight read the same way.
+/// cooperative: cancelling the awaiting task abandons the WAIT without
+/// closing the connection (data that arrives later is buffered for the next
+/// read), while `close()` cancels the connection and unblocks any in-flight
+/// read with `CancellationError`. The MSE timeout path relies on the former,
+/// the wire idle-poll path on the latter.
 final class NWByteChannel: MSEByteChannel, @unchecked Sendable {
     private let connection: NWConnection
     private let lock = NSLock()
     private var buffer = Data()
     private var pending: CheckedContinuation<Data, Error>?
-    private var cancelled = false
+    private var receiveInFlight = false
+    private var closed = false
 
     init(connection: NWConnection) {
         self.connection = connection
     }
 
     func write(_ data: Data) async throws {
-        let cancelledNow = lock.withLock { cancelled }
-        guard !cancelledNow else { throw CancellationError() }
+        guard !lock.withLock({ closed }) else { throw CancellationError() }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {
@@ -283,10 +317,10 @@ final class NWByteChannel: MSEByteChannel, @unchecked Sendable {
             switch lock.withLock({ takeIfAvailable(count) }) {
             case .bytes(let out):
                 return out
-            case .cancelled:
+            case .closed:
                 throw CancellationError()
             case .waiting:
-                let chunk = try await receiveChunk()
+                let chunk = try await waitForChunk()
                 lock.withLock { buffer.append(chunk) }
             }
         }
@@ -294,11 +328,12 @@ final class NWByteChannel: MSEByteChannel, @unchecked Sendable {
 
     /// Cancel the connection; any pending read resumes with `CancellationError`.
     func close() {
-        lock.lock()
-        cancelled = true
-        let cont = pending
-        pending = nil
-        lock.unlock()
+        let cont = lock.withLock { () -> CheckedContinuation<Data, Error>? in
+            closed = true
+            let c = pending
+            pending = nil
+            return c
+        }
         connection.cancel()
         cont?.resume(throwing: CancellationError())
     }
@@ -306,82 +341,105 @@ final class NWByteChannel: MSEByteChannel, @unchecked Sendable {
     /// Outcome of a `takeIfAvailable` attempt.
     private enum TakeResult {
         case bytes(Data)
-        case cancelled
+        case closed
         case waiting
     }
 
     /// Caller must hold `lock`. Returns buffered bytes when `count` are
-    /// available, `.cancelled` once the connection is closed, else `.waiting`.
+    /// available, `.closed` once the connection is closed, else `.waiting`.
     private func takeIfAvailable(_ count: Int) -> TakeResult {
         if buffer.count >= count {
             let out = Data(buffer.prefix(count))
             buffer.removeFirst(count)
             return .bytes(out)
         }
-        if cancelled { return .cancelled }
+        if closed { return .closed }
         return .waiting
     }
 
-    /// One `receive` roundtrip. The continuation is stored under the lock and
-    /// resumed exactly once, either by the completion handler or by
-    /// cancellation.
-    private func receiveChunk() async throws -> Data {
+    /// Wait for the next chunk from the wire. If a receive is already in
+    /// flight (an earlier wait was abandoned), just register the
+    /// continuation — the in-flight completion delivers into the buffer and
+    /// satisfies it. Cancelling the wait abandons it WITHOUT closing the
+    /// connection; the outstanding receive keeps running and buffers any
+    /// late data.
+    private func waitForChunk() async throws -> Data {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-                let cancelledNow = lock.withLock {
-                    if cancelled {
-                        return true
+                let action = lock.withLock { () -> WaitAction in
+                    if closed {
+                        return .closed
                     }
                     pending = cont
-                    return false
+                    if !receiveInFlight {
+                        receiveInFlight = true
+                        return .startReceive
+                    }
+                    return .wait
                 }
-                if cancelledNow {
+                switch action {
+                case .closed:
                     cont.resume(throwing: CancellationError())
-                    return
-                }
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                    self.completeReceive(data: data, isComplete: isComplete, error: error)
+                case .wait:
+                    break
+                case .startReceive:
+                    connection.receive(minimumIncompleteLength: 1,
+                                       maximumLength: 64 * 1024) { data, _, isComplete, error in
+                        self.completeReceive(data: data, isComplete: isComplete, error: error)
+                    }
                 }
             }
         } onCancel: {
-            cancelPendingReceive()
+            abandonWait()
         }
     }
 
-    /// Runs on the connection's queue. Takes the continuation out from under
-    /// the lock before resuming it (never resume while holding the lock).
+    private enum WaitAction {
+        case closed
+        case wait
+        case startReceive
+    }
+
+    /// Abandon the current wait (task cancellation): clear the continuation
+    /// but leave the connection and any in-flight receive alone. Late data
+    /// is buffered by `completeReceive`.
+    private func abandonWait() {
+        let cont = lock.withLock { () -> CheckedContinuation<Data, Error>? in
+            let c = pending
+            pending = nil
+            return c
+        }
+        cont?.resume(throwing: CancellationError())
+    }
+
+    /// Runs on the connection's queue. When a continuation is waiting it is
+    /// resumed with the chunk directly (the reader buffers it); when the
+    /// wait was abandoned the data is buffered here for the next read.
     private func completeReceive(data: Data?, isComplete: Bool, error: NWError?) {
         lock.lock()
-        guard let cont = pending else {
-            lock.unlock()
-            return
-        }
-        pending = nil
-        lock.unlock()
-
-        if let error {
-            if cancelled {
-                cont.resume(throwing: CancellationError())
-            } else {
-                cont.resume(throwing: error)
-            }
-        } else if let data, !data.isEmpty {
-            cont.resume(returning: data)
-        } else {
-            // EOF (data nil/empty + isComplete), or an empty non-complete
-            // delivery which should not happen with minimumIncompleteLength 1.
-            cont.resume(throwing: ChannelError.eof)
-        }
-    }
-
-    private func cancelPendingReceive() {
-        lock.lock()
-        cancelled = true
+        receiveInFlight = false
         let cont = pending
         pending = nil
+        if cont == nil, let data, !data.isEmpty {
+            buffer.append(data)
+        }
         lock.unlock()
-        connection.cancel()
-        cont?.resume(throwing: CancellationError())
+
+        if let cont {
+            if let error {
+                if closed {
+                    cont.resume(throwing: CancellationError())
+                } else {
+                    cont.resume(throwing: error)
+                }
+            } else if let data, !data.isEmpty {
+                cont.resume(returning: data)
+            } else {
+                // EOF (data nil/empty + isComplete), or an empty non-complete
+                // delivery which should not happen with minimumIncompleteLength 1.
+                cont.resume(throwing: ChannelError.eof)
+            }
+        }
     }
 }
 

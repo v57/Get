@@ -38,3 +38,8 @@ Plan: .hermes/plans/2026-08-16_174727-torrent-download-engine.md
 - [x] T19 DownloadStore + TorrentView (ContentView rewrite)  — commit bbfa914. @Observable DownloadStore, NavigationStack list with progress, fileImporter; xcodebuild BUILD SUCCEEDED
 
 ## Done — 21 commits, full suite 127/127 (`swift test --no-parallel`), app builds
+
+## Post-plan — Sidebar UI + file priorities (Aug 17)
+- [x] Engine: FileLayout.fileIndex(ofByteOffset:) (piece→file), PiecePicker order-based fetch (`setOrder`), TorrentSession.setFilePriorities + per-file progress in TorrentStats — commit eb3ed8b (+9 tests)
+- [x] UI: NavigationSplitView (downloads sidebar + detail pane), per-file progress bars, priority mode (click files → priority 1–4, others after) — commit 80ba45f
+- [x] Verified: full suite 136/136 (`swift test --no-parallel`), xcodebuild BUILD SUCCEEDED

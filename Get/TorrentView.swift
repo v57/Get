@@ -102,8 +102,10 @@ struct TorrentView: View {
     private var sidebar: some View {
         List(selection: $selectedID) {
             ForEach(store.items) { item in
-                SidebarRow(item: item)
-                    .tag(item.id)
+                SidebarRow(item: item) {
+                    store.togglePause(itemID: item.id)
+                }
+                .tag(item.id)
             }
         }
         .navigationTitle("Downloads")
@@ -119,14 +121,25 @@ struct TorrentView: View {
     }
 }
 
-/// Compact sidebar row: title, mini progress bar, state line.
+/// Compact sidebar row: title, mini progress bar, state line, pause button.
 private struct SidebarRow: View {
     let item: DownloadStore.DownloadItem
+    let onTogglePause: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(item.title)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(item.title)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if item.state == .downloading || item.state == .paused {
+                    Button(action: onTogglePause) {
+                        Image(systemName: item.state == .paused ? "play.circle" : "pause.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(item.state == .paused ? "Resume" : "Pause")
+                }
+            }
             ProgressView(value: item.progress)
                 .controlSize(.small)
             HStack(spacing: 4) {
@@ -142,6 +155,13 @@ private struct SidebarRow: View {
             .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            if item.state == .downloading || item.state == .paused {
+                Button(item.state == .paused ? "Resume" : "Pause") {
+                    onTogglePause()
+                }
+            }
+        }
     }
 }
 
@@ -236,12 +256,14 @@ private struct TorrentDetailView: View {
             }
             List {
                 ForEach(item.files) { file in
-                    FileRow(file: file, priorityMode: priorityMode)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            guard priorityMode else { return }
-                            togglePriority(for: file)
-                        }
+                    FileRow(file: file, priorityMode: priorityMode) {
+                        store.toggleFilePaused(fileIndex: file.index, itemID: itemID)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard priorityMode else { return }
+                        togglePriority(for: file)
+                    }
                 }
             }
             .listStyle(.inset)
@@ -263,10 +285,11 @@ private struct TorrentDetailView: View {
     }
 }
 
-/// One file row: name, size, per-file progress, priority badge.
+/// One file row: name, size, per-file progress, priority badge, pause button.
 private struct FileRow: View {
     let file: DownloadStore.DownloadFileItem
     let priorityMode: Bool
+    let onTogglePause: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -283,12 +306,23 @@ private struct FileRow: View {
                         .background(Capsule().fill(Color.accentColor.opacity(0.15)))
                         .foregroundStyle(.tint)
                 }
+                if file.isPaused {
+                    Text("Paused")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button(action: onTogglePause) {
+                    Image(systemName: file.isPaused ? "play.circle" : "pause.circle")
+                }
+                .buttonStyle(.borderless)
+                .help(file.isPaused ? "Resume file" : "Pause file")
                 Text(Self.formatSize(file.length))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
             ProgressView(value: Double(file.verifiedBytes), total: Double(max(file.length, 1)))
+                .opacity(file.isPaused ? 0.4 : 1)
             HStack {
                 Text("\(Int(Double(file.verifiedBytes) / Double(max(file.length, 1)) * 100))%")
                     .font(.caption2)
@@ -301,6 +335,7 @@ private struct FileRow: View {
             }
         }
         .padding(.vertical, 2)
+        .opacity(file.isPaused ? 0.75 : 1)
     }
 
     private static func formatSize(_ bytes: Int64) -> String {

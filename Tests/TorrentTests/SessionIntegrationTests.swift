@@ -318,6 +318,58 @@ private func waitForState(_ target: TorrentState,
     #expect(try Data(contentsOf: dir.appendingPathComponent("pause/b.bin")) == fileB)
 }
 
+@Test func testWholeDownloadPauseResume() async throws {
+    // Pause() must stop requests; resume() must wake the idle peer loop and
+    // finish the download. 1 MiB at 16 KiB pieces, with a serve delay so the
+    // pause lands mid-download.
+    let content = makeContent(1024 * 1024)
+    let seeder = try FakeSeeder(content: content, pieceLength: 16 * 1024,
+                                infoHash: [UInt8](repeating: 0xAB, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8),
+                                serveDelay: .milliseconds(2))
+    defer { seeder.stop() }
+    let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+    let bundle = try SyntheticTorrent.make(data: content, pieceLength: 16 * 1024,
+                                           name: "whole.bin",
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+    let dir = try makeTempDir("whole")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    try await session.start()
+
+    // Wait for the first verified piece, then pause.
+    var sawPiece = false
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(10))
+    for await event in events {
+        if case .pieceVerified = event { sawPiece = true; break }
+        if clock.now > deadline { break }
+    }
+    #expect(sawPiece, "no piece verified before pause")
+
+    await session.pause()
+    #expect(await session.currentState() == .paused)
+
+    // In-flight requests (up to the pipeline depth) still land and complete;
+    // wait for them to drain, then no NEW requests may arrive while paused.
+    try await Task.sleep(for: .milliseconds(250))
+    let pausedRequests = seeder.requestedPieces.count
+    try await Task.sleep(for: .milliseconds(400))
+    #expect(seeder.requestedPieces.count == pausedRequests,
+            "requests continued while paused")
+
+    await session.resume()
+    let completed = await waitForState(.completed, in: events, timeout: .seconds(15))
+    #expect(completed, "download did not complete after resume")
+    #expect(try Data(contentsOf: dir.appendingPathComponent("whole.bin")) == content)
+}
+
 @Test func testCancelMidDownload() async throws {
     // 2 MiB with a per-block serve delay so the download takes ~0.5s and the
     // cancel lands mid-flight.

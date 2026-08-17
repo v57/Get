@@ -22,6 +22,8 @@ final class DownloadStore {
         /// Download priority: 0 = none (after all prioritized files),
         /// 1...4 = fetched in priority order.
         var priority: Int = 0
+        /// True while this file's pieces are not being fetched.
+        var isPaused: Bool = false
 
         var id: Int { index }
     }
@@ -108,6 +110,32 @@ final class DownloadStore {
         }
     }
 
+    /// Pause the whole download (stops requesting; in-flight blocks finish).
+    func pause(itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].state == .downloading else { return }
+        items[index].state = .paused
+        Task { await sessions[itemID]?.pause() }
+    }
+
+    /// Resume a paused download.
+    func resume(itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].state == .paused else { return }
+        items[index].state = .downloading
+        Task { await sessions[itemID]?.resume() }
+    }
+
+    /// Toggle pause/resume for a whole download (for sidebar buttons).
+    func togglePause(itemID: String) {
+        if let index = items.firstIndex(where: { $0.id == itemID }),
+           items[index].state == .paused {
+            resume(itemID: itemID)
+        } else {
+            pause(itemID: itemID)
+        }
+    }
+
     // MARK: - Priorities
 
     /// Set one file's priority (0 clears it) and push the whole priority
@@ -135,6 +163,25 @@ final class DownloadStore {
                 file.priority > 0 ? (file.index, file.priority) : nil
             })
         Task { await sessions[itemID]?.setFilePriorities(table) }
+    }
+
+    // MARK: - Per-file pause
+
+    /// Pause or resume one file: its pieces drop out of the fetch order
+    /// until resumed.
+    func setFilePaused(_ paused: Bool, fileIndex: Int, itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].files.indices.contains(fileIndex) else { return }
+        items[index].files[fileIndex].isPaused = paused
+        Task { await sessions[itemID]?.setFilePaused(paused, fileIndex: fileIndex) }
+    }
+
+    /// Toggle one file's paused state (for row buttons).
+    func toggleFilePaused(fileIndex: Int, itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].files.indices.contains(fileIndex) else { return }
+        setFilePaused(!items[index].files[fileIndex].isPaused,
+                      fileIndex: fileIndex, itemID: itemID)
     }
 
     // MARK: - Events

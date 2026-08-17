@@ -49,4 +49,5 @@ Plan: .hermes/plans/2026-08-16_174727-torrent-download-engine.md
 - [x] UI: pause button per sidebar download + per file in detail — commit 5084a0b
 - [x] Engine: FileLayout.rootURL (Trash unit) + TorrentSession.dataRootURL + ResumeState.fileURL(infoHashHex:) — commit dee6f48 (+3 tests)
 - [x] UI: trash button (detail toolbar + sidebar context menu; moves files to Trash, drops resume state) + auto-resume on relaunch (persists .torrent copy in Application Support/Get/Torrents, store init reopens them) — commit 7a16035; verified via launch cycle: copy persisted → relaunch logged "Resuming 1 saved download(s)"
+- [x] UI: active downloads stage in ~/Downloads/Downloading, moved to ~/Downloads on completion, Downloading removed once empty — commit b47019a; file-move semantics verified via standalone port (stage/move/empty-removal/kept-while-other-downloading)
 - [x] Verified: full suite 141/141 (`swift test --no-parallel`), xcodebuild BUILD SUCCEEDED

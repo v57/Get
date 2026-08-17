@@ -9,6 +9,23 @@ import Torrent
 @Observable
 final class DownloadStore {
 
+    /// One file inside a torrent download.
+    struct DownloadFileItem: Identifiable {
+        /// Index in the torrent's file list (the session's file index).
+        let index: Int
+        /// Display path (components joined with "/").
+        let path: String
+        /// File size in bytes.
+        let length: Int64
+        /// Verified bytes downloaded for this file.
+        var verifiedBytes: Int64 = 0
+        /// Download priority: 0 = none (after all prioritized files),
+        /// 1...4 = fetched in priority order.
+        var priority: Int = 0
+
+        var id: Int { index }
+    }
+
     /// A single torrent download as shown in the list.
     struct DownloadItem: Identifiable {
         /// Infohash hex — unique per torrent.
@@ -19,6 +36,8 @@ final class DownloadStore {
         var speed: String = ""
         var peers: Int = 0
         var error: String?
+        /// The torrent's files (empty for non-torrent downloads).
+        var files: [DownloadFileItem] = []
     }
 
     private(set) var items: [DownloadItem] = []
@@ -39,7 +58,12 @@ final class DownloadStore {
 
         let session = TorrentSession(torrent: torrent, settings: TorrentSettings())
         sessions[id] = session
-        items.append(DownloadItem(id: id, title: torrent.name))
+        let files = torrent.files.enumerated().map { index, file in
+            DownloadFileItem(index: index,
+                             path: file.path.joined(separator: "/"),
+                             length: file.length)
+        }
+        items.append(DownloadItem(id: id, title: torrent.name, files: files))
 
         let task = Task { [weak self] in
             defer { self?.eventTasks[id] = nil }
@@ -72,6 +96,35 @@ final class DownloadStore {
         }
     }
 
+    // MARK: - Priorities
+
+    /// Set one file's priority (0 clears it) and push the whole priority
+    /// table to the session so the picker reorders immediately.
+    func setPriority(_ priority: Int, fileIndex: Int, itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].files.indices.contains(fileIndex) else { return }
+        items[index].files[fileIndex].priority = priority
+        pushPriorities(itemID: itemID)
+    }
+
+    /// Clear every priority for a torrent (entering priority mode).
+    func clearAllPriorities(itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
+        for fileIndex in items[index].files.indices {
+            items[index].files[fileIndex].priority = 0
+        }
+        pushPriorities(itemID: itemID)
+    }
+
+    private func pushPriorities(itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
+        let table = Dictionary(uniqueKeysWithValues:
+            items[index].files.compactMap { file in
+                file.priority > 0 ? (file.index, file.priority) : nil
+            })
+        Task { await sessions[itemID]?.setFilePriorities(table) }
+    }
+
     // MARK: - Events
 
     private func apply(_ event: TorrentEvent, to id: String) {
@@ -86,6 +139,11 @@ final class DownloadStore {
             items[index].progress = stats.progress
             items[index].speed = Self.formatSpeed(stats.downloadSpeed)
             items[index].peers = stats.peersConnected
+            if stats.fileVerifiedBytes.count == items[index].files.count {
+                for fileIndex in items[index].files.indices {
+                    items[index].files[fileIndex].verifiedBytes = stats.fileVerifiedBytes[fileIndex]
+                }
+            }
         case .error(let message):
             items[index].error = message
         case .pieceVerified, .peer:

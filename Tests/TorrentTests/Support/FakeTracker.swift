@@ -29,8 +29,8 @@ final class FakeTracker: @unchecked Sendable {
     /// The most recent announce request (nil until the first one arrives).
     var lastAnnounce: Announce? { lock.withLock { _lastAnnounce } }
 
-    private let peersData: Data
-    private let peers6Data: Data
+    private var peersData: Data
+    private var peers6Data: Data
     private let interval: Int
     private let failureReason: String?
     private let seeders: Int?
@@ -132,6 +132,14 @@ final class FakeTracker: @unchecked Sendable {
         acceptThread.name = "FakeTracker.accept"
         acceptThread.start()
         box.tracker = self
+    }
+
+    /// Allow tests to change the peer list served on subsequent announces.
+    func setPeers(_ peers: Data, peers6: Data = Data()) {
+        lock.withLock {
+            self.peersData = peers
+            self.peers6Data = peers6
+        }
     }
 
     deinit {

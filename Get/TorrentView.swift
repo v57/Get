@@ -13,8 +13,7 @@ struct TorrentView: View {
 
     var body: some View {
         NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240)
+            sidebar.navigationSplitViewColumnWidth(min: 200, ideal: 240).tint(.red)
         } detail: {
             if let id = selectedID, let item = store.items.first(where: { $0.id == id }) {
                 TorrentDetailView(store: store, itemID: item.id)
@@ -25,7 +24,7 @@ struct TorrentView: View {
                     description: Text("Choose a download from the sidebar.")
                 )
             }
-        }
+        }.contentTransition(.symbolEffect)
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 10)
@@ -129,20 +128,17 @@ private struct SidebarRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(item.title)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
+            HStack(spacing: 4) {
+                Text(item.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
                 if item.state == .downloading || item.state == .paused {
                     Button(action: onTogglePause) {
-                        Image(systemName: item.state == .paused ? "play.circle" : "pause.circle")
+                        Image(systemName: item.state == .paused ? "play.fill" : "pause.fill")
                     }
                     .buttonStyle(.borderless)
                     .help(item.state == .paused ? "Resume" : "Pause")
                 }
             }
-            ProgressView(value: item.progress)
-                .controlSize(.small)
+            ProgressView(value: item.progress).controlSize(.small)
             HStack(spacing: 4) {
                 Text(item.state.label)
                 if !item.speed.isEmpty {
@@ -151,7 +147,7 @@ private struct SidebarRow: View {
                 Spacer(minLength: 0)
                 Text("\(Int(item.progress * 100))%")
                     .monospacedDigit()
-            }
+            }.contentTransition(.numericText())
             .font(.caption2)
             .foregroundStyle(.secondary)
         }
@@ -165,7 +161,7 @@ private struct SidebarRow: View {
             Button("Move to Trash", role: .destructive) {
                 onTrash()
             }
-        }
+        }.animation(.smooth, value: item.state)
     }
 }
 
@@ -182,17 +178,24 @@ private struct TorrentDetailView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            if !item.files.isEmpty {
-                fileList
-            } else {
-                Spacer()
+        List {
+            Section {
+                ForEach(item.files) { file in
+                    FileRow(file: file, priorityMode: priorityMode) {
+                        store.toggleFilePaused(fileIndex: file.index, itemID: itemID)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard priorityMode else { return }
+                        togglePriority(for: file)
+                    }
+                }
             }
-        }
-        .padding()
-        .navigationTitle(item.title)
-        .toolbar {
+        }.safeAreaInset(edge: .top) {
+            VStack {
+                header
+            }.padding(.horizontal)
+        }.tint(.red).navigationTitle(item.title).toolbar {
             ToolbarItem(placement: .primaryAction) {
                 if !item.files.isEmpty, item.state == .downloading || item.state == .paused {
                     Button(priorityMode ? "Done" : "Priority") {
@@ -229,73 +232,33 @@ private struct TorrentDetailView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(item.state.label)
-                    .font(.title3.weight(.semibold))
-                if !item.speed.isEmpty {
-                    Text(item.speed)
-                }
-                Spacer()
-                Text("\(Int(item.progress * 100))%")
-                    .font(.title3.weight(.semibold).monospacedDigit())
-            }
-            ProgressView(value: item.progress)
-                .controlSize(.large)
             // Detailed status: connected peers, seeders, tracker swarm counts.
             HStack(spacing: 12) {
+                Text(item.state.label)
                 LabeledContent("Peers") {
                     Text("\(item.peers)").monospacedDigit()
                 }
-                LabeledContent("Seeds (connected)") {
+                LabeledContent("Seeds") {
                     Text("\(item.seeders)").monospacedDigit()
                 }
                 if let s = item.trackerSeeders, let l = item.trackerLeechers {
-                    LabeledContent("Swarm (tracker)") {
+                    LabeledContent("Swarm") {
                         Text("\(s) seeds · \(l) leechers").monospacedDigit()
                     }
                 }
-            }
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            }.font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             if let error = item.error {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+            if priorityMode {
+                Text("Click files to set priority 1–4; others download after.").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
     // MARK: File list
-
-    private var fileList: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Files")
-                    .font(.headline)
-                Spacer()
-                if priorityMode {
-                    Text("Click files to set priority 1–4; others download after.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            List {
-                ForEach(item.files) { file in
-                    FileRow(file: file, priorityMode: priorityMode) {
-                        store.toggleFilePaused(fileIndex: file.index, itemID: itemID)
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        guard priorityMode else { return }
-                        togglePriority(for: file)
-                    }
-                }
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
-        }
-    }
 
     private func togglePriority(for file: DownloadStore.DownloadFileItem) {
         if file.priority > 0 {
@@ -347,22 +310,34 @@ private struct FileRow: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            ProgressView(value: Double(file.verifiedBytes), total: Double(max(file.length, 1)))
+            DualProgressView(primary: file.sequentialBytes, secondary: file.verifiedBytes, total: file.length)
                 .opacity(file.isPaused ? 0.4 : 1)
-            HStack {
-                Text("\(Int(Double(file.verifiedBytes) / Double(max(file.length, 1)) * 100))%")
+            if priorityMode {
+                Text(file.priority > 0 ? "Click to clear" : "Click to prioritize")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if priorityMode {
-                    Text(file.priority > 0 ? "Click to clear" : "Click to prioritize")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 2)
         .opacity(file.isPaused ? 0.75 : 1)
     }
+  
+  struct DualProgressView: View {
+    let primary: Int64
+    let secondary: Int64
+    let total: Int64
+    var primaryProgress: Double { max(0, min(Double(primary) / Double(total), 1)) }
+    var secondaryProgress: Double { max(0, min(Double(secondary) / Double(total), 1)) }
+    var body: some View {
+      GeometryReader { view in
+        ZStack(alignment: .leading) {
+          Capsule().fill(.primary.opacity(0.05)).frame(width: view.size.width, height: 2)
+          Capsule().fill(.tint.opacity(0.5)).frame(width: view.size.width * secondaryProgress, height: 2)
+          Capsule().fill(.tint).frame(width: view.size.width * primaryProgress, height: 4)
+        }
+      }.frame(height: 4)
+    }
+  }
 
     private static func formatSize(_ bytes: Int64) -> String {
         let units = ["B", "KB", "MB", "GB"]

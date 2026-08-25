@@ -13,6 +13,10 @@ public enum WireMessage: Sendable, Equatable {
     case request(index: Int, begin: Int, length: Int)
     case piece(index: Int, begin: Int, data: Data)
     case cancel(index: Int, begin: Int, length: Int)
+    /// BEP 10 extended message (id 20): a 1-byte sub-id followed by a body.
+    /// Sub-id 0 is the extended handshake; others are negotiated extensions
+    /// (e.g. ut_pex under the id advertised in the handshake).
+    case extended(id: UInt8, payload: Data)
 }
 
 public enum WireCodecError: Error, Equatable, Sendable {
@@ -63,6 +67,10 @@ public enum WireCodec {
             appendUInt32(index, to: &payload)
             appendUInt32(begin, to: &payload)
             appendUInt32(length, to: &payload)
+        case .extended(let id, let body):
+            payload.append(20)
+            payload.append(id)
+            payload.append(body)
         }
 
         var framed = Data()
@@ -125,6 +133,10 @@ public enum WireCodec {
             return .cancel(index: readUInt32(payload, at: 1),
                            begin: readUInt32(payload, at: 5),
                            length: readUInt32(payload, at: 9))
+        case 20:
+            guard payload.count >= 2 else { throw WireCodecError.malformed("extended must carry a sub-id") }
+            return .extended(id: payload[payload.startIndex + 1],
+                             payload: Data(payload.dropFirst(2)))
         default:
             throw WireCodecError.unknownID(id)
         }

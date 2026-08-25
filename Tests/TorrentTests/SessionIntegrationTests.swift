@@ -261,6 +261,71 @@ private func waitForState(_ target: TorrentState,
             "per-file progress is wrong: \(finalFileProgress)")
 }
 
+// MARK: - Sequential (contiguous-from-start) per-file progress
+
+/// The sequential head of each file: contiguous verified prefix bytes from
+/// the file's start, stopping at the first unverified piece in that file.
+@Test func sequentialFileProgressStopsAtFirstGapPerFile() {
+    // Two files, 16 KiB pieces. File A = 5 pieces (81,920 B), File B =
+    // 6 pieces (98,304 B). Verified: A fully (pieces 0..<5), B only pieces
+    // 5..<8 — a gap at piece 8 stops B's head at 3 pieces.
+    let fileEnds: [Int64] = [81_920, 180_224]
+    let verified: Set<Int> = Set(0..<8)   // 0..4 = A, 5..7 = B
+    let head = TorrentSession.sequentialFileProgress(pieceCount: 11,
+                                                     pieceLength: 16 * 1024,
+                                                     totalSize: 180_224,
+                                                     fileEnds: fileEnds,
+                                                     verified: verified)
+    // A: pieces 0-4 fully verified → all 81,920 B count.
+    // B: pieces 5,6,7 verified = 49,152 B; piece 8 missing stops the head.
+    #expect(head == [81_920, 49_152], "sequential heads wrong: \(head)")
+}
+
+@Test func sequentialFileProgressHeadsAreIndependentPerFile() {
+    // File A has a gap at piece 2; File B (later) is fully verified. B's
+    // head must NOT be killed by A's gap.
+    // File A = 4 pieces (65,536 B), File B = 4 pieces (65,536 B).
+    let fileEnds: [Int64] = [65_536, 131_072]
+    let verified: Set<Int> = [0, 1, 3, 4, 5, 6, 7]   // gap at piece 2 (in A)
+    let head = TorrentSession.sequentialFileProgress(pieceCount: 8,
+                                                     pieceLength: 16 * 1024,
+                                                     totalSize: 131_072,
+                                                     fileEnds: fileEnds,
+                                                     verified: verified)
+    // A: pieces 0,1 = 32,768 B, then gap at 2 → head = 32,768 B.
+    // B: starts at piece 4, all verified → head = 65,536 B.
+    #expect(head == [32_768, 65_536], "per-file heads must be independent: \(head)")
+}
+
+@Test func sequentialFileProgressHandlesStraddlingLastPiece() {
+    // One file of 40 KB with 16 KiB pieces: pieces 0 (16 K), 1 (16 K),
+    // 2 (8 K — straddles nothing here, it's the last short piece). Verified
+    // all → head = full 40 KB.
+    let head = TorrentSession.sequentialFileProgress(pieceCount: 3,
+                                                     pieceLength: 16 * 1024,
+                                                     totalSize: 40_000,
+                                                     fileEnds: [40_000],
+                                                     verified: [0, 1, 2])
+    #expect(head == [40_000], "straddling last piece should count fully: \(head)")
+
+    // Gap at the last piece → head stops before it.
+    let partial = TorrentSession.sequentialFileProgress(pieceCount: 3,
+                                                        pieceLength: 16 * 1024,
+                                                        totalSize: 40_000,
+                                                        fileEnds: [40_000],
+                                                        verified: [0, 1])
+    #expect(partial == [32 * 1024], "head should stop at the gap: \(partial)")
+}
+
+@Test func sequentialFileProgressEmptyVerifiedIsAllZero() {
+    let head = TorrentSession.sequentialFileProgress(pieceCount: 4,
+                                                     pieceLength: 16 * 1024,
+                                                     totalSize: 64 * 1024,
+                                                     fileEnds: [64 * 1024],
+                                                     verified: [])
+    #expect(head == [0])
+}
+
 @Test func testFilePauseDefersItsPieces() async throws {
     // File A = pieces 0-2, File B = pieces 3-5. Pausing B must keep its
     // pieces out of the fetch order until it's resumed.
@@ -461,4 +526,73 @@ private func waitForState(_ target: TorrentState,
     #expect(FileManager.default.fileExists(atPath: saved.path))
     let savedData = try Data(contentsOf: saved)
     #expect(savedData != content, "cancel did not interrupt the download")
+}
+
+/// Peer-slot leak regression: when a peer's connect/handshake fails,
+/// the session MUST release its peerTasks/spawnedPeers slots. Before the
+/// fix, 80 consecutive failed connects permanently blocked all future
+/// peer spawning for the session ("Downloading", 0 peers forever).
+@Test func testFailedPeersReleaseSlotsAndAllowNewOnes() async throws {
+    // 1 MiB content, 16 KiB pieces = 64 pieces. We'll use a tracker that
+    // initially returns only bad peers (wrong port → connection refused),
+    // then returns a good peer on the next announce.
+    let content = makeContent(1024 * 1024)
+    let goodPort: UInt16 = 12345  // will bind a real seeder here later
+
+    // Seeder on a known port (we control it).
+    let seederPeerID = Array("-FAKE_SEEDER-0000000".utf8)
+    let seeder = try FakeSeeder(content: content, pieceLength: 16 * 1024,
+                                infoHash: [UInt8](repeating: 0xAB, count: 20),
+                                peerID: seederPeerID,
+                                port: goodPort)
+    defer { seeder.stop() }
+
+    // Start with a tracker that returns 85 bad peers (port 1 = refused).
+    // 85 > maxPeers (80), so without the fix the session would fill all
+    // slots on the first announce and never spawn the good peer.
+    var badPeers = Data()
+    for _ in 0..<85 { badPeers += compactPeer(port: 1) }
+    let tracker = try FakeTracker(peers: badPeers, interval: 60)
+    let bundle = try SyntheticTorrent.make(data: content, pieceLength: 16 * 1024,
+                                           name: "slot-leak.bin", announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+    let dir = try makeTempDir("slot-leak")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+    settings.maxPeers = 80
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    try await session.start()
+
+    // Wait for the first announce to complete (all 85 bad peers will try
+    // and fail — connection refused on port 1). The session should not
+    // deadlock; it will cycle through them, each failing and (after the fix)
+    // releasing its slot immediately.
+    var sawState = false
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(10))
+    for await event in events {
+        if case .state(let s) = event {
+            if s == .downloading { sawState = true; break }
+        }
+        if clock.now > deadline { break }
+    }
+    #expect(sawState, "session never entered downloading state")
+
+    // Now give the tracker the GOOD peer and force a re-announce.
+    // If slots leaked, peerTasks.count == maxPeers and the new peer
+    // would never be spawned. With the fix, slots freed, so it connects.
+    tracker.setPeers(compactPeer(port: goodPort))
+    await session.reannounce()
+
+    // Wait for completion — the good peer must be spawned and serve all pieces.
+    let completed = await waitForState(.completed, in: events, timeout: .seconds(30))
+    #expect(completed, "download did not complete; likely peer slots leaked")
+
+    let saved = dir.appendingPathComponent("slot-leak.bin").standardizedFileURL
+    let savedData = try Data(contentsOf: saved)
+    #expect(savedData == content)
 }

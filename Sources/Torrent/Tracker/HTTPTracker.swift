@@ -18,11 +18,11 @@ public struct TrackerAnnounceParams: Sendable {
     /// Event: "started" | "completed" | "stopped" | nil.
     public var event: String?
     /// Requested number of peers.
-    public var numwant: Int = 50
+    public var numwant: Int = 200
 
     public init(infoHash: Data, peerID: Data, port: UInt16,
                 uploaded: Int64 = 0, downloaded: Int64 = 0, left: Int64,
-                event: String? = nil, numwant: Int = 50) {
+                event: String? = nil, numwant: Int = 200) {
         self.infoHash = infoHash
         self.peerID = peerID
         self.port = port

@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import os
+import CryptoKit
 import Torrent
 
 /// Owns the torrent sessions backing the UI. Holds one `DownloadItem` per
@@ -21,6 +22,9 @@ final class DownloadStore {
         let length: Int64
         /// Verified bytes downloaded for this file.
         var verifiedBytes: Int64 = 0
+        /// Contiguous verified prefix bytes — how much of this file is
+        /// downloaded from its start (the sequential playable head).
+        var sequentialBytes: Int64 = 0
         /// Download priority: 0 = none (after all prioritized files),
         /// 1...4 = fetched in priority order.
         var priority: Int = 0
@@ -134,6 +138,13 @@ final class DownloadStore {
         // Active downloads stage in ~/Downloads/Downloading; on completion
         // they move to ~/Downloads.
         settings.saveDirectory = Self.activeDirectory
+        // Peer discovery beyond trackers, like the reference clients:
+        // DHT finds live peers, PEX exchanges them over established links.
+        settings.useDHT = true
+        settings.usePEX = true
+        // Accept inbound connections so other clients (e.g. Transmission)
+        // can connect to us as a peer.
+        settings.useInbound = true
 
         let session = TorrentSession(torrent: torrent, settings: settings)
         sessions[id] = session
@@ -340,9 +351,11 @@ final class DownloadStore {
             items[index].seeders = stats.seedersConnected
             items[index].trackerSeeders = stats.trackerSeeders
             items[index].trackerLeechers = stats.trackerLeechers
-            if stats.fileVerifiedBytes.count == items[index].files.count {
+            if stats.fileVerifiedBytes.count == items[index].files.count
+                && stats.fileSequentialBytes.count == items[index].files.count {
                 for fileIndex in items[index].files.indices {
                     items[index].files[fileIndex].verifiedBytes = stats.fileVerifiedBytes[fileIndex]
+                    items[index].files[fileIndex].sequentialBytes = stats.fileSequentialBytes[fileIndex]
                 }
             }
         case .error(let message):
@@ -368,8 +381,22 @@ final class DownloadStore {
                FileManager.default.fileExists(atPath: from.path) {
                 do {
                     try FileManager.default.moveItem(at: from, to: to)
+                } catch CocoaError.fileWriteFileExists {
+                    // A file with the same name is already in Downloads. If
+                    // it's byte-identical (a previous completed run of this
+                    // same torrent), the staged copy is redundant — the
+                    // existing file IS the finished download. Anything else
+                    // collides: keep staging and surface it.
+                    if Self.filesMatch(at: from, and: to) {
+                        try? FileManager.default.removeItem(at: from)
+                        Self.log.info("Completed download already exists in Downloads (\(to.lastPathComponent, privacy: .public)); kept existing copy")
+                    } else {
+                        items[index].error = "A different \"\(to.lastPathComponent)\" already exists in Downloads"
+                        Self.log.error("Move blocked: \(to.lastPathComponent, privacy: .public) exists in Downloads and differs")
+                        return
+                    }
                 } catch {
-                    Self.log.error("Couldn't move \(from.lastPathComponent) to Downloads: \(error.localizedDescription)")
+                    Self.log.error("Couldn't move \(from.lastPathComponent, privacy: .public) to Downloads: \(error.localizedDescription, privacy: .public)")
                     return
                 }
             }
@@ -385,11 +412,32 @@ final class DownloadStore {
             try? FileManager.default.removeItem(at: ResumeState.fileURL(infoHashHex: itemID))
 
             Self.removeActiveDirectoryIfEmpty()
-            Self.log.info("Moved \(to.lastPathComponent) to Downloads")
+            Self.log.info("Moved \(to.lastPathComponent, privacy: .public) to Downloads")
         }
     }
 
+    /// Byte-identical check for the move-collision case: same length, then
+    /// SHA-256 over both files (chunked, constant memory).
+    private static func filesMatch(at a: URL, and b: URL) -> Bool {
+        let fm = FileManager.default
+        guard let sa = try? fm.attributesOfItem(atPath: a.path)[.size] as? Int64,
+              let sb = try? fm.attributesOfItem(atPath: b.path)[.size] as? Int64,
+              sa == sb else { return false }
+        func digest(_ url: URL) -> Data? {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? handle.close() }
+            var hasher = SHA256()
+            while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+                hasher.update(data: chunk)
+            }
+            return Data(hasher.finalize())
+        }
+        guard let da = digest(a), let db = digest(b) else { return false }
+        return da == db
+    }
+
     private static func formatSpeed(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond > 0 else { return "" }
         let units = ["B/s", "KB/s", "MB/s", "GB/s"]
         var value = bytesPerSecond
         var unit = 0

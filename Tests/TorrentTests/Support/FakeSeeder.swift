@@ -56,7 +56,7 @@ final class FakeSeeder: @unchecked Sendable {
     private var _result: Result?
 
     init(content: Data, pieceLength: Int, infoHash: [UInt8], peerID: [UInt8],
-         mode: Mode = .encrypted, serveDelay: Duration = .zero) throws {
+         mode: Mode = .encrypted, serveDelay: Duration = .zero, port: UInt16 = 0) throws {
         self.content = content
         self.pieceLength = pieceLength
         self.infoHash = infoHash
@@ -64,7 +64,7 @@ final class FakeSeeder: @unchecked Sendable {
         self.mode = mode
         self.serveDelay = serveDelay
 
-        // socket/bind/listen on 127.0.0.1:0 (ephemeral).
+        // socket/bind/listen on 127.0.0.1:port (ephemeral if port == 0).
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw FakeSeederError.posix(errno) }
         var on: Int32 = 1
@@ -72,7 +72,7 @@ final class FakeSeeder: @unchecked Sendable {
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0  // ephemeral
+        addr.sin_port = in_port_t(port.bigEndian)  // specific port or 0 = ephemeral
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let bindResult = withUnsafePointer(to: &addr) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in

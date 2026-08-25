@@ -206,6 +206,70 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
     #expect(picker.cursor == 3)
 }
 
+// MARK: - Received-block tracking (multi-block piece progression)
+
+@Test func receivedBlockIsNotReRequested() {
+    var picker = makePicker(pieceCount: 1, pieceLength: 16 * 1024 * 4)   // 1 piece, 4 blocks
+    picker.setAllAvailable(on: peerA)
+
+    // Fill the pipeline: blocks 0..<4 of piece 0.
+    let b0 = picker.request(for: peerA, pipeline: 4)
+    let b1 = picker.request(for: peerA, pipeline: 4)
+    let b2 = picker.request(for: peerA, pipeline: 4)
+    let b3 = picker.request(for: peerA, pipeline: 4)
+    #expect([b0, b1, b2, b3].compactMap { $0?.begin } == [0, 16_384, 32_768, 49_152])
+
+    // Block 0 arrives: completing it frees the pipeline slot, but the picker
+    // must NOT re-request block 0 (it is buffered) — it must request the
+    // piece's next missing block. There are no more blocks in piece 0, so
+    // request returns nil (previously it re-requested block 0 forever).
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 0), on: peerA)
+    #expect(picker.request(for: peerA, pipeline: 4) == nil,
+            "completed-but-unverified block 0 must not be re-requested")
+
+    // The remaining blocks still complete normally.
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 16_384), on: peerA)
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 32_768), on: peerA)
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 49_152), on: peerA)
+
+    // Verify the piece: received bookkeeping is dropped, cursor advances.
+    picker.advancePast(0)
+    #expect(picker.received[0] == nil)
+    #expect(picker.cursor == 1)
+}
+
+@Test func receivedBlockProgressionAcrossPieces() {
+    var picker = makePicker(pieceCount: 2, pieceLength: 16 * 1024 * 2)   // 2 pieces, 2 blocks each
+    picker.setAllAvailable(on: peerA)
+
+    // Request block 0 of piece 0; complete it; the next request must be
+    // block 1 of piece 0 (not block 0 again).
+    #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 0), on: peerA)
+    #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 0, begin: 16_384, length: 16 * 1024),
+            "after completing block 0, the next request must be block 1, not block 0 again")
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 16_384), on: peerA)
+    picker.advancePast(0)
+
+    // Piece 1 starts fresh: block 0 requestable again.
+    #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 1, begin: 0, length: 16 * 1024))
+}
+
+@Test func resetReceivedAllowsRefetch() {
+    var picker = makePicker(pieceCount: 1, pieceLength: 16 * 1024 * 2)
+    picker.setAllAvailable(on: peerA)
+
+    _ = picker.request(for: peerA, pipeline: 4)   // block 0
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 0), on: peerA)
+    #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 0, begin: 16_384, length: 16 * 1024))
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: 16_384), on: peerA)
+
+    // Hash mismatch: reset the piece so ALL its blocks are re-requestable.
+    picker.resetReceived(0)
+    #expect(picker.received[0] == nil)
+    #expect(picker.request(for: peerA, pipeline: 4) == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+}
+
 // MARK: - Availability
 
 @Test func setAllAvailableMakesEveryPieceRequestable() {

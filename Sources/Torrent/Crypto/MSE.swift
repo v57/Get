@@ -171,7 +171,115 @@ public struct MSEHandshake: Sendable {
         }
     }
 
+    /// Run the RESPONDER handshake over `channel` (the role used for inbound
+    /// connections: a peer initiated MSE and we reply). Mirrors the verified
+    /// responder in the test fake: read [Ya 96], reply [Yb 96][PadB], derive
+    /// mirrored keys, resync on `HASH("req1" || S)`, verify the obfuscated
+    /// infohash, decrypt/verify the initiator's [VC][crypto_provide][PadC]
+    /// [len(IA)][IA], and reply [VC][crypto_select][len(PadD)=0][IA]. On
+    /// success the returned ciphers are positioned exactly where the wire
+    /// protocol continues. Throws `MSEHandshakeError.timedOut` on timeout.
+    public func accept<Channel: MSEByteChannel>(
+        over channel: Channel,
+        timeout: Duration = .seconds(20)
+    ) async throws -> MSEHandshakeResult {
+        try await withThrowingTaskGroup(of: MSEHandshakeResult.self) { group in
+            group.addTask { try await self.performAccept(over: channel) }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw MSEHandshakeError.timedOut
+            }
+            guard let result = try await group.next() else {
+                throw MSEHandshakeError.timedOut
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
     // MARK: - Handshake steps
+
+    /// The responder-side handshake (inbound). The initiator's steps are
+    /// mirrored: we read their public key, send ours, derive the shared
+    /// secret with OUR private key, resync on the sync hash, verify the
+    /// obfuscated infohash, and reply with the encrypted handshake.
+    private func performAccept<Channel: MSEByteChannel>(over channel: Channel) async throws -> MSEHandshakeResult {
+        // 1. Read the initiator's public key (exactly 96 bytes). A plaintext
+        //    BT handshake reply means the peer does not speak MSE — drop it
+        //    (encrypted-only policy).
+        let first20 = Array(try await channel.read(20))
+        try Task.checkCancellation()
+        if first20.count == 20, first20.first == 19,
+           Data(first20.dropFirst()) == Data("BitTorrent protocol".utf8) {
+            throw MSEHandshakeError.peerDoesNotSupportEncryption
+        }
+        let ya = first20 + Array(try await channel.read(76))
+        try Task.checkCancellation()
+        precondition(ya.count == 96, "MSEByteChannel.read must return exactly count bytes")
+
+        // 2. Our key pair; reply [Yb 96][PadB 0-512].
+        let yb = Self.publicKey(for: privateKey)
+        let padB = Self.randomBytes(Int.random(in: 0...512))
+        try await channel.write(Data(yb + padB))
+        try Task.checkCancellation()
+
+        // 3. DH secret; keys MIRRORED: our send = initiator recv, our recv =
+        //    initiator send.
+        let secret = modPow(ya, privateKey, MSEPrime.bytes)
+        let keys = MSE.deriveKeys(secret: secret, streamKey: Array(infoHash))
+        var sendCipher = RC4(key: keys.recv)
+        var recvCipher = RC4(key: keys.send)
+        sendCipher.drop(1024)
+        recvCipher.drop(1024)
+
+        // 4. Resync on HASH('req1', S): the incoming clear stream is
+        //    [PadA][sync 20][obfuscated 20][encrypted...]; PadA's length is
+        //    unknown, so find the sync hash.
+        let syncHash = MSE.syncHash(secret: secret)
+        var reader = BufferedReader(channel: channel)
+        let padLen = try await reader.scanFor(pattern: syncHash, maxPad: 512)
+        _ = try reader.consume(padLen + 20)  // PadA + the sync hash itself
+
+        // 5. Verify the obfuscated infohash.
+        let obfuscated = Array(try await reader.read(20))
+        let expected = MSE.obfuscatedInfoHash(streamKey: Array(infoHash), secret: secret)
+        guard obfuscated == expected else { throw MSEHandshakeError.handshakeFailed }
+
+        // 6. Read + verify the encrypted section:
+        //    [VC 8][crypto_provide 4][len(PadC) 2][PadC][len(IA) 2][IA 68].
+        var header = Array(try await reader.read(14))
+        recvCipher.stream(&header)
+        guard Array(header.prefix(8)) == MSE.vc else { throw MSEHandshakeError.handshakeFailed }
+        guard Self.be32(Array(header[8..<12])) & MSE.cryptoProvideRC4 != 0 else {
+            throw MSEHandshakeError.cryptoNotSelected
+        }
+        let lenPadC = Int(header[12]) << 8 | Int(header[13])
+        guard lenPadC <= 512 else { throw MSEHandshakeError.handshakeFailed }
+        var padC = Array(try await reader.read(lenPadC))
+        recvCipher.stream(&padC)
+        var lenIA = Array(try await reader.read(2))
+        recvCipher.stream(&lenIA)
+        let iaLen = Int(lenIA[0]) << 8 | Int(lenIA[1])
+        guard iaLen == 68 else { throw MSEHandshakeError.handshakeFailed }
+        var ia = Array(try await reader.read(iaLen))
+        recvCipher.stream(&ia)
+        guard ia.count == 68, ia[0] == 19,
+              Array(ia[1..<20]) == Array("BitTorrent protocol".utf8),
+              Array(ia[28..<48]) == Array(infoHash) else {
+            throw MSEHandshakeError.handshakeFailed
+        }
+
+        // 7. Reply: [VC 8][crypto_select 4][len(PadD) 2 = 0][IA 68], encrypted
+        //    with our send stream. (The initiator resyncs on ENCRYPT(VC).)
+        var reply = MSE.vc + Self.be32Bytes(MSE.cryptoProvideRC4) + [0, 0]
+            + Self.btHandshake(infoHash: infoHash, peerID: peerID)
+        sendCipher.stream(&reply)
+        try await channel.write(Data(reply))
+        try Task.checkCancellation()
+
+        return MSEHandshakeResult(sendCipher: sendCipher, recvCipher: recvCipher,
+                                  peerHandshakeBytes: Data(ia))
+    }
 
     private func perform<Channel: MSEByteChannel>(over channel: Channel) async throws -> MSEHandshakeResult {
         // 1. [Ya 96][PadA 0-512] — public key first.
@@ -258,8 +366,14 @@ public struct MSEHandshake: Sendable {
     // MARK: - Helpers
 
     /// The 68-byte BitTorrent handshake carried inside MSE's encrypted IA.
+    /// Reserved byte 5 (index 25) bit 0x10 advertises BEP 10 extension
+    /// support — REQUIRED before any extended message (id 20) is sent; peers
+    /// that don't see the bit treat an extended message as a protocol
+    /// violation and drop the connection.
     private static func btHandshake(infoHash: Data, peerID: Data) -> [UInt8] {
-        [19] + Array("BitTorrent protocol".utf8) + [UInt8](repeating: 0, count: 8)
+        var reserved = [UInt8](repeating: 0, count: 8)
+        reserved[5] = 0x10  // BEP 10 extended messaging
+        return [19] + Array("BitTorrent protocol".utf8) + reserved
             + Array(infoHash) + Array(peerID)
     }
 

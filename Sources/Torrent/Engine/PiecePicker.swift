@@ -44,6 +44,13 @@ public struct PiecePicker: Sendable {
     /// Blocks currently in flight, per peer.
     public private(set) var pending: [PeerID: Set<BlockKey>] = [:]
 
+    /// Blocks already received (buffered awaiting piece verification), keyed
+    /// by piece. The picker must NOT re-request these: a block that completed
+    /// is freed from `pending`, and scanning from block 0 would otherwise
+    /// re-request it forever instead of advancing to the next missing block.
+    /// Cleared when the piece verifies (cursor advances) or fails (re-fetch).
+    public private(set) var received: [Int: Set<BlockKey>] = [:]
+
     public struct BlockKey: Hashable, Sendable {
         public let piece: Int
         public let begin: Int
@@ -116,9 +123,10 @@ public struct PiecePicker: Sendable {
                 for set in pending.values {
                     inflight.formUnion(set.filter { $0.piece == piece })
                 }
+                let alreadyReceived = received[piece] ?? []
                 for b in 0..<blocks {
                     let key = BlockKey(piece: piece, begin: b * blockSize)
-                    if !inflight.contains(key) {
+                    if !inflight.contains(key), !alreadyReceived.contains(key) {
                         pending[peer, default: []].insert(key)
                         return Block(piece: piece, begin: key.begin,
                                      length: min(blockSize, pieceSize(of: piece) - key.begin))
@@ -130,9 +138,20 @@ public struct PiecePicker: Sendable {
         return nil
     }
 
-    /// A block was received from `peer`: release its pipeline slot.
+    /// A block was received from `peer`: release its pipeline slot and mark
+    /// the block as received so it is not re-requested while the piece is
+    /// still being assembled. When the piece verifies, `advancePast` clears
+    /// the received set; on a hash mismatch the caller must call
+    /// `resetReceived(piece:)` so the piece is fetched again from scratch.
     public mutating func complete(_ key: BlockKey, on peer: PeerID) {
         pending[peer]?.remove(key)
+        received[key.piece, default: []].insert(key)
+    }
+
+    /// Drop the received-block bookkeeping for a piece (hash mismatch, peer
+    /// disconnect) so its blocks are re-requestable.
+    public mutating func resetReceived(_ piece: Int) {
+        received[piece] = nil
     }
 
     /// A peer went away: free its in-flight blocks so others can fetch them,
@@ -143,10 +162,12 @@ public struct PiecePicker: Sendable {
     }
 
     /// A piece was verified: the cursor moves past it in fetch order (never
-    /// backwards). Pieces not in the fetch order are ignored.
+    /// backwards), and its received-block bookkeeping is dropped (the piece
+    /// is done). Pieces not in the fetch order are ignored.
     public mutating func advancePast(_ piece: Int) {
         guard let pos = order.firstIndex(of: piece) else { return }
         cursorPos = max(cursorPos, pos + 1)
+        received[piece] = nil
     }
 
     /// Number of blocks in `piece`.

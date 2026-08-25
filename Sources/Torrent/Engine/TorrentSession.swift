@@ -12,17 +12,87 @@ public struct TorrentSettings: Sendable, Equatable {
     public var sequential: Bool = true
     public var encryptedPeersOnly: Bool = true
     public var allowUpload: Bool = false
-    public var maxPeers: Int = 30
-    public var pipelinePerPeer: Int = 4
+    public var maxPeers: Int = 80
+    /// Starting blocks in flight per peer before its speed is known.
+    /// 16 KiB blocks × 64 = 1 MiB outstanding — enough for a slow start
+    /// without binding a fast peer.
+    public var pipelinePerPeer: Int = 64
+    /// Hard ceiling on blocks in flight per peer (Transmission uses ~250).
+    /// The per-peer queue is sized adaptively from the peer's measured
+    /// download rate (see `PeerRateTracker`), clamped to this.
+    public var maxPipelinePerPeer: Int = 250
     public var blockSize: Int = 16 * 1024
     /// The local port advertised to trackers. Get is zero-upload and never
     /// accepts inbound connections, so peers won't reach it — but trackers
     /// validate that `port` is a real port, so it must be non-zero.
     public var listenPort: UInt16 = 6881
+    /// Whether to run a BEP 5 DHT node to discover peers beyond trackers.
+    /// Off by default (keeps headless tests hermetic); the app enables it.
+    public var useDHT: Bool = false
+    /// Advertise the local peer id / port via PEX when a peer supports it.
+    public var usePEX: Bool = false
+    /// Accept inbound peer connections (bind a listener on `listenPort` and
+    /// answer the MSE responder handshake). Off by default (keeps headless
+    /// tests hermetic); the app enables it so other clients can connect to
+    /// us as a peer.
+    public var useInbound: Bool = false
 
     public init() {
         saveDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Downloads")
+    }
+}
+
+/// Tracks one peer's measured download rate (bytes/sec, EMA over 500ms
+/// windows) and derives how many blocks to keep in flight for it.
+///
+/// A flat per-peer pipeline caps throughput: in-flight bytes / RTT is the
+/// max rate that peer can deliver, so a 64-block (1 MiB) queue tops out at
+/// ~10 MB/s on a 100 ms-RTT peer. Real clients (libtorrent) instead size the
+/// queue to ~2-3 s of the peer's *measured* rate — a fast peer gets a deep
+/// queue (up to the clamp) and can saturate the link alone, while a slow
+/// peer doesn't pile up requests it can't serve.
+struct PeerRateTracker: Sendable {
+    /// EMA window length; injectable so tests can close windows without
+    /// sleeping (default 500ms).
+    var window: Duration = .milliseconds(500)
+    /// Injectable time source (nanoseconds); defaults to the monotonic clock.
+    private let nowNanos: @Sendable () -> Int64
+    private var bytesSinceWindow: Int64 = 0
+    private var lastWindowStart: Int64
+    private var emaBytesPerSecond: Double = 0
+
+    init(nowNanos: @escaping @Sendable () -> Int64 = {
+        // Monotonic nanoseconds since boot (DispatchTime.uptimeNanoseconds).
+        Int64(DispatchTime.now().uptimeNanoseconds)
+    }) {
+        self.nowNanos = nowNanos
+        self.lastWindowStart = nowNanos()
+    }
+
+    /// Feed bytes received from the peer. Recomputes the EMA every `window`.
+    mutating func record(bytes added: Int64) {
+        bytesSinceWindow += added
+        let now = nowNanos()
+        let elapsedNanos = now - lastWindowStart
+        // window in nanoseconds: Duration is attoseconds, so /1e9.
+        let windowNanos = window.components.attoseconds / 1_000_000_000
+        guard elapsedNanos >= windowNanos else { return }
+        let seconds = Double(elapsedNanos) / 1e9
+        guard seconds > 0 else { return }
+        let instant = Double(bytesSinceWindow) / seconds
+        emaBytesPerSecond = emaBytesPerSecond == 0
+            ? instant
+            : emaBytesPerSecond * 0.7 + instant * 0.3
+        bytesSinceWindow = 0
+        lastWindowStart = now
+    }
+
+    /// Blocks to keep in flight: ~2 s of buffered data at the measured rate,
+    /// clamped to `min` (until the rate is known) and `max` (sanity ceiling).
+    func pipelineDepth(blockSize: Int, min: Int, max: Int) -> Int {
+        let target = Int(emaBytesPerSecond * 2.0 / Double(blockSize))
+        return Swift.min(Swift.max(target, min), max)
     }
 }
 
@@ -52,13 +122,18 @@ public struct TorrentStats: Sendable, Equatable {
     /// Verified bytes per file, in torrent file order (exact attribution
     /// including pieces that straddle file boundaries).
     public var fileVerifiedBytes: [Int64]
+    /// Contiguous verified prefix bytes per file, in torrent file order —
+    /// how much of each file is playable from its start (the sequential
+    /// download head, which stops at the first gap).
+    public var fileSequentialBytes: [Int64]
 
     public init(verifiedBytes: Int64 = 0, totalBytes: Int64 = 0,
                 peersConnected: Int = 0, peersSeen: Int = 0,
                 seedersConnected: Int = 0,
                 trackerSeeders: Int? = nil, trackerLeechers: Int? = nil,
                 downloadSpeed: Double = 0, progress: Double = 0,
-                fileVerifiedBytes: [Int64] = []) {
+                fileVerifiedBytes: [Int64] = [],
+                fileSequentialBytes: [Int64] = []) {
         self.verifiedBytes = verifiedBytes
         self.totalBytes = totalBytes
         self.peersConnected = peersConnected
@@ -69,6 +144,7 @@ public struct TorrentStats: Sendable, Equatable {
         self.downloadSpeed = downloadSpeed
         self.progress = progress
         self.fileVerifiedBytes = fileVerifiedBytes
+        self.fileSequentialBytes = fileSequentialBytes
     }
 }
 
@@ -120,8 +196,16 @@ public actor TorrentSession {
     private var peers: [PeerID: PeerConnection] = [:]
     private var peerTasks: [PeerID: Task<Void, Never>] = [:]
     private var spawnedPeers: Set<PeerID> = []
+    /// Per-peer adaptive pipeline depth (see `PeerRateTracker`). Updated by
+    /// `handlePiece` as blocks arrive; read by the peer loop to size requests.
+    private var peerRates: [PeerID: PeerRateTracker] = [:]
     private var trackerTask: Task<Void, Never>?
     private var statsTask: Task<Void, Never>?
+    private var dhtTask: Task<Void, Never>?
+    /// A BEP 5 DHT node (created only when `settings.useDHT`) for extra peers.
+    private var dht: DHTNode?
+    /// Accepts inbound peer connections (created when `settings.useInbound`).
+    private var acceptor: PeerAcceptor?
     private var announcedPeers: [TrackerPeer] = []
     private var bytesAtLastTick: Int64 = 0
     /// Seed/leech counts from the last successful announce (tracker-reported).
@@ -161,6 +245,9 @@ public actor TorrentSession {
         self.stats = TorrentStats(totalBytes: torrent.totalSize,
                                   fileVerifiedBytes: [Int64](repeating: 0,
                                                              count: layout.entries.count))
+        self.dht = settings.useDHT ? (try? DHTNode()) : nil
+        // The inbound acceptor is created in start() (its closure captures
+        // self, which is not safe during init).
         // Apply any priorities set before start(): the default order is
         // ascending; priorities reorder it.
         self.picker.setOrder(Self.priorityOrder(pieceCount: pieceCount,
@@ -194,8 +281,9 @@ public actor TorrentSession {
         guard state == .stopped else { return }
         // Seed resume state before prepare(): a resume is only valid when the
         // data files already exist in the save directory, and prepare() would
-        // create them from scratch.
-        applyResumeState()
+        // create them from scratch. Claimed-verified pieces are re-verified
+        // against the disk before being trusted.
+        await applyResumeState()
 
         if verifiedPieces.count == picker.pieceCount {
             // Every piece already verified in a previous session: go straight
@@ -209,10 +297,53 @@ public actor TorrentSession {
         emit(.state(.downloading))
         startStatsLoop()
 
+        // Bind the inbound listener BEFORE announcing so the advertised port
+        // is the one actually listening. The acceptor is created here (its
+        // closure captures self, which is unsafe during init).
+        if settings.useInbound, acceptor == nil {
+            acceptor = PeerAcceptor(
+                infoHash: torrent.infoHash,
+                peerID: ourPeerID,
+                encryptedOnly: settings.encryptedPeersOnly,
+                connectTimeout: .seconds(15),
+                readTimeout: .seconds(90)
+            ) { [weak self] peer in
+                await self?.runInboundPeer(peer)
+            }
+        }
+        if let acceptor {
+            do {
+                try await acceptor.start(port: settings.listenPort)
+                self.boundListenerPort = await acceptor.port()
+                Self.log.info("listening on port \(self.boundListenerPort ?? 0, privacy: .public)")
+            } catch {
+                Self.log.error("inbound listener failed: \(error, privacy: .public)")
+            }
+        }
+
         let peers = await announceStarted()
         announcedPeers = peers
         Self.log.info("announce returned \(peers.count, privacy: .public) peer(s)")
         spawnPeerTasks(for: peers)
+
+        // DHT peer discovery (when enabled): bootstrap, then iteratively
+        // query for peers on a timer — the swarm changes, and each pass
+        // samples new nodes/peers.
+        if let dht {
+            dhtTask = Task {
+                await dht.bootstrap()
+                while !Task.isCancelled {
+                    let found = await dht.getPeers(infoHash: torrent.infoHash)
+                    let peers = found.map { TrackerPeer(host: $0.ip, port: $0.port) }
+                        if !peers.isEmpty {
+                        Self.log.info("DHT found \(peers.count, privacy: .public) peer(s)")
+                        self.spawnPeerTasks(for: peers)
+                                        }
+                    await dht.announcePeer(infoHash: torrent.infoHash, port: advertisedPort)
+                    try? await Task.sleep(for: .seconds(90))
+                }
+            }
+        }
 
         if let interval = lastAnnounceInterval {
             trackerTask = Task { await self.trackerLoop(interval: interval) }
@@ -248,6 +379,10 @@ public actor TorrentSession {
         trackerTask = nil
         statsTask?.cancel()
         statsTask = nil
+        dhtTask?.cancel()
+        dhtTask = nil
+        dht?.close()
+        await acceptor?.stop()
         await disk.close()
         state = .stopped
         emit(.state(.stopped))
@@ -329,11 +464,22 @@ public actor TorrentSession {
 
     private var lastAnnounceInterval: Int?
 
+    /// The port to advertise to trackers/DHT: the bound listener port when
+    /// inbound is enabled (so peers can reach us), otherwise the configured
+    /// `listenPort` (outbound-only still needs a non-zero value).
+    private var advertisedPort: UInt16 {
+        // The acceptor is an actor; reading its port needs an await, but this
+        // is called from non-async contexts. Cache the bound port here.
+        boundListenerPort ?? settings.listenPort
+    }
+
+    private var boundListenerPort: UInt16?
+
     private func announceParams(event: String?) -> TrackerAnnounceParams {
         TrackerAnnounceParams(
             infoHash: torrent.infoHash,
             peerID: ourPeerID,
-            port: settings.listenPort,
+            port: advertisedPort,
             uploaded: 0,
             downloaded: stats.verifiedBytes,
             left: max(0, torrent.totalSize - stats.verifiedBytes),
@@ -369,8 +515,13 @@ public actor TorrentSession {
     }
 
     private func trackerLoop(interval: Int) async {
+        // Re-announce at most every 60s regardless of the tracker's suggested
+        // interval (which can be 1800s = 30 min) — frequent announces sample
+        // different peers from the swarm, and the tracker only returns a few
+        // per response. This is how real clients accumulate a peer pool.
+        let tick = max(1, min(interval, 60))
         while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(max(1, interval)))
+            try? await Task.sleep(for: .seconds(tick))
             if Task.isCancelled { return }
             guard state == .downloading else { continue }
             let params = announceParams(event: nil)
@@ -383,6 +534,7 @@ public actor TorrentSession {
                 }
             }
             announcedPeers = fresh
+            Self.log.info("re-announce returned \(fresh.count, privacy: .public) peer(s)")
             spawnPeerTasks(for: fresh)
         }
     }
@@ -391,6 +543,23 @@ public actor TorrentSession {
         guard let url = announceURLs.first else { return }
         let params = announceParams(event: event)
         Task { try? await HTTPTracker.announce(url: url, params: params, timeout: .seconds(10)) }
+    }
+
+    /// Force an immediate re-announce (bypassing the tracker loop's interval).
+    /// Useful for tests that need to inject new peers immediately.
+    public func reannounce() async {
+        let params = announceParams(event: nil)
+        var fresh: [TrackerPeer] = []
+        for url in announceURLs {
+            if let response = try? await HTTPTracker.announce(url: url, params: params, timeout: .seconds(15)) {
+                fresh.append(contentsOf: response.peers)
+            } else if let response = try? await UDPTracker.announce(url: url, params: params, timeout: .seconds(15)) {
+                fresh.append(contentsOf: response.peers)
+            }
+        }
+        announcedPeers = fresh
+        Self.log.info("reannounce returned \(fresh.count, privacy: .public) peer(s)")
+        spawnPeerTasks(for: fresh)
     }
 
     // MARK: - Peers
@@ -421,31 +590,76 @@ public actor TorrentSession {
                                         readTimeout: .seconds(90))
         peers[key] = connection
         Self.log.info("connecting to \(host, privacy: .public):\(port)")
+        do {
+            try await connection.start()
+            await peerLoop(connection: connection, key: key, label: "\(host):\(port)", established: true)
+        } catch {
+            // The loop's defer never ran — this peer never reached peerLoop,
+            // so nothing has cleaned up after it yet. Report the failure.
+            emit(.peer(.dropped("\(host):\(port) — \(error)")))
+        }
+        // Cleanup MUST happen on every exit path. It used to live only in
+        // peerLoop's defer — a failed connect/handshake leaked the peer's
+        // slots permanently, and once maxPeers distinct endpoints had failed
+        // the session stopped spawning peers forever ("Downloading", 0 peers).
+        peers[key] = nil
+        peerTasks[key] = nil
+    }
+
+    /// An inbound connection that already completed the MSE responder
+    /// handshake (via `PeerAcceptor`). Runs the same download loop.
+    private func runInboundPeer(_ connection: PeerConnection) async {
+        let key = PeerID(raw: Data(UUID().uuidString.utf8))
+        peers[key] = connection
+        let remoteID = await connection.remotePeerIDHex()
+        Self.log.info("inbound peer connected: \(remoteID, privacy: .public)")
+        await peerLoop(connection: connection, key: key, label: "inbound", established: true)
+    }
+
+    /// The shared per-peer wire loop: keep the pipeline full, read messages,
+    /// and handle them. Runs until the task is cancelled or the download
+    /// completes.
+    private func peerLoop(connection: PeerConnection, key: PeerID, label: String, established: Bool) async {
         var choked = true
         var sentOurBitfield = false
         var loggedNoUpload = false
-        var established = false
 
         defer {
             picker.disconnect(key)
             peers[key] = nil
             peerTasks[key] = nil
+            peerRates[key] = nil
             stats.peersConnected = max(0, stats.peersConnected - 1)
             Task { await connection.close() }
         }
 
         do {
-            try await connection.start()
-            established = true
             stats.peersConnected += 1
             stats.peersSeen += 1
-            emit(.peer(.connected("\(host):\(port)")))
+            emit(.peer(.connected(label)))
             try await connection.send(.interested)
+            // Advertise BEP 10 extensions (ut_pex) so peers can exchange peers.
+            try await connection.send(.extended(id: 0, payload: PEX.handshake()))
+            var peerPEXID: UInt8?
+            // Adaptive per-peer pipeline: sized to ~2 s of the peer's measured
+            // rate so a single fast peer can saturate the link (a fixed small
+            // queue caps at in-flight/RTT), while slow peers don't pile up
+            // requests. `min` keeps the pipe primed until the rate is known.
+            var rateTracker = peerRates[key] ?? PeerRateTracker()
+            peerRates[key] = rateTracker
 
             while !Task.isCancelled {
+                // Re-sync the rate tracker with what handlePiece recorded
+                // (it lives on the actor; this loop's local copy goes stale).
+                rateTracker = peerRates[key] ?? rateTracker
+                peerRates[key] = rateTracker
                 // Keep the pipeline full while unchoked (and not paused).
                 if !paused, !choked {
-                    while let block = picker.request(for: key, pipeline: settings.pipelinePerPeer) {
+                    let depth = rateTracker.pipelineDepth(
+                        blockSize: settings.blockSize,
+                        min: settings.pipelinePerPeer,
+                        max: settings.maxPipelinePerPeer)
+                    while let block = picker.request(for: key, pipeline: depth) {
                         try await connection.send(.request(index: block.piece,
                                                            begin: block.begin,
                                                            length: block.length))
@@ -469,10 +683,10 @@ public actor TorrentSession {
                 switch message {
                 case .choke:
                     choked = true
-                    Self.log.info("\(host, privacy: .public):\(port) choked (idle=\(idle, privacy: .public))")
+                    Self.log.info("\(label, privacy: .public) choked (idle=\(idle, privacy: .public))")
                 case .unchoke:
                     choked = false
-                    Self.log.info("\(host, privacy: .public):\(port) unchoked")
+                    Self.log.info("\(label, privacy: .public) unchoked")
                 case .bitfield(let bits):
                     picker.setAvailable(piecesFromBitfield(bits), on: key)
                     if !sentOurBitfield {
@@ -486,31 +700,52 @@ public actor TorrentSession {
                     picker.setAvailable(available, on: key)
                 case .piece(let index, let begin, let data):
                     await handlePiece(index: index, begin: begin, data: data, key: key)
+                case .extended(let id, let payload):
+                    if id == 0 {
+                        // Peer's extended handshake: read its ut_pex sub-id and
+                        // share our known peers back.
+                        if let utpex = PEX.parseHandshake(payload) {
+                            peerPEXID = utpex
+                            let added = announcedPeers.map { ($0.host, $0.port) }
+                            if !added.isEmpty {
+                                try await connection.send(
+                                    .extended(id: PEX.pexExtendedID,
+                                              payload: PEX.pexBody(added: added)))
+                            }
+                        }
+                    } else if id == peerPEXID {
+                        // Peer exchange: discover new peers from the swarm.
+                        let discovered = PEX.parsePEX(payload)
+                            .map { TrackerPeer(host: $0.0, port: $0.1) }
+                        spawnPeerTasks(for: discovered)
+                    }
                 case .request, .cancel, .interested, .notInterested, .keepAlive:
                     // No-upload enforcement: never respond to request/piece.
                     if !loggedNoUpload, case .request = message {
                         loggedNoUpload = true
                     }
+                    _ = peerPEXID
                 }
                 if case .completed = state { break }
             }
         } catch let error as PeerConnectionError {
             if case .peerDoesNotSupportEncryption = error {
-                emit(.peer(.dropped("\(host):\(port) — plaintext peer rejected")))
+                emit(.peer(.dropped("\(label) — plaintext peer rejected")))
             } else if established {
-                emit(.peer(.disconnected("\(host):\(port) — \(error)")))
+                emit(.peer(.disconnected("\(label) — \(error)")))
             } else {
-                emit(.peer(.dropped("\(host):\(port) — \(error)")))
+                emit(.peer(.dropped("\(label) — \(error)")))
             }
         } catch {
             // Any failure before the connection was established (including a
             // cancellation racing the connect) means the peer never became
             // usable — report it as dropped, not disconnected.
             if established {
-                emit(.peer(.disconnected("\(host):\(port) — \(error)")))
+                emit(.peer(.disconnected("\(label) — \(error)")))
             } else {
-                emit(.peer(.dropped("\(host):\(port) — \(error)")))
+                emit(.peer(.dropped("\(label) — \(error)")))
             }
+            Self.log.info("\(label, privacy: .public) wire error: \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -532,6 +767,9 @@ public actor TorrentSession {
 
     private func handlePiece(index: Int, begin: Int, data: Data, key: PeerID) async {
         guard index >= 0, index < picker.pieceCount, begin >= 0 else { return }
+        // Feed the peer's rate tracker so its pipeline depth adapts to its
+        // measured speed (deep queue for fast peers, shallow for slow).
+        peerRates[key, default: PeerRateTracker()].record(bytes: Int64(data.count))
         let pieceSize = picker.pieceSize(of: index)
         let expectedLength = min(settings.blockSize, pieceSize - begin)
         guard begin < pieceSize, data.count == expectedLength else {
@@ -566,7 +804,10 @@ public actor TorrentSession {
                 continuation.finish()
                 return
             }
-            // Clear the buffer and let the picker re-request this piece.
+            // Clear the buffer AND the picker's received-block bookkeeping so
+            // this piece is re-fetched from scratch.
+            pieceBuffers[index] = nil
+            picker.resetReceived(index)
             return
         }
 
@@ -579,6 +820,11 @@ public actor TorrentSession {
             return
         }
 
+        // Only AFTER the bytes are on disk does the piece count as verified:
+        // recording it earlier would let a crash between the two leave a
+        // resume state claiming a verified piece whose data was never written
+        // (the stale-claim bug). Persist here so the snapshot never claims
+        // un-written pieces.
         verifiedPieces.insert(index)
         picker.advancePast(index)
         stats.verifiedBytes += Int64(pieceSize)
@@ -609,21 +855,36 @@ public actor TorrentSession {
     }
 
     /// Seed the verified-piece set and picker cursor from persisted resume
-    /// state. Trusts the persisted bitfield (no re-hash on start); a state
-    /// file is ignored when it doesn't match this torrent (piece length or
-    /// total size) or when the data files aren't present in the save
-    /// directory. Best effort — a missing or corrupt state simply means the
-    /// download starts from scratch.
-    private func applyResumeState() {
+    /// state. Every piece the state claims as verified is RE-VERIFIED against
+    /// the data on disk (SHA-1 vs the torrent's piece hashes) before being
+    /// trusted; a stale or corrupt claim — e.g. a piece recorded as verified
+    /// before its bytes were actually written, or a piece whose file region
+    /// was overwritten/truncated since — is dropped and re-fetched. A state
+    /// file is ignored entirely when it doesn't match this torrent (piece
+    /// length or total size) or when the data files aren't present in the
+    /// save directory. Best effort — a missing, corrupt, or unusable state
+    /// simply means the download starts from scratch.
+    private func applyResumeState() async {
         guard resumeDataFilesPresent else { return }
         guard let resume = ResumeState.load(infoHash: torrent.infoHash) else { return }
         guard resume.pieceLength == torrent.pieceLength,
               resume.totalSize == torrent.totalSize else { return }
+        var adopted = 0
         for index in resume.verified.sorted() {
             guard index >= 0, index < picker.pieceCount,
                   !verifiedPieces.contains(index) else { continue }
+            guard let data = try? await disk.read(piece: index),
+                  data.count == picker.pieceSize(of: index),
+                  Data(Insecure.SHA1.hash(data: data)) == torrent.pieceHashes[index] else {
+                Self.log.info("resume state claimed piece \(index, privacy: .public) verified but it does not hash — re-fetching")
+                continue
+            }
             verifiedPieces.insert(index)
             stats.verifiedBytes += Int64(picker.pieceSize(of: index))
+            adopted += 1
+        }
+        if adopted != resume.verified.count {
+            Self.log.info("resume state: adopted \(adopted, privacy: .public) of \(resume.verified.count, privacy: .public) claimed verified pieces")
         }
         // The order must exclude the resumed verified pieces — the frontier
         // becomes the first unverified piece in the (priority) order.
@@ -657,6 +918,10 @@ public actor TorrentSession {
         trackerTask = nil
         statsTask?.cancel()
         statsTask = nil
+        dhtTask?.cancel()
+        dhtTask = nil
+        dht?.close()
+        await acceptor?.stop()
         await disk.close()
         continuation.finish()
     }
@@ -679,6 +944,7 @@ public actor TorrentSession {
                 ? Double(stats.verifiedBytes) / Double(stats.totalBytes)
                 : 1
             stats.fileVerifiedBytes = computeFileProgress()
+            stats.fileSequentialBytes = computeSequentialFileProgress()
             // A connected peer is a seeder if its announced set is complete.
             stats.seedersConnected = picker.peerHas.values
                 .filter { $0.count >= picker.pieceCount }
@@ -702,6 +968,54 @@ public actor TorrentSession {
             }
         }
         return perFile
+    }
+
+    /// Contiguous verified prefix bytes per file — how much of each file is
+    /// downloaded from its start, stopping at the first gap in THAT file.
+    /// Because the picker fetches sequentially (in fetch order), this is the
+    /// playable head: a media file can stream from byte 0 up to this point.
+    /// Each file's head is computed independently (file priorities mean a
+    /// later file's prefix can be complete while an earlier file has gaps).
+    /// A piece counts only when fully verified — a straddling piece's bytes
+    /// in this file count if the whole piece verified.
+    private func computeSequentialFileProgress() -> [Int64] {
+        Self.sequentialFileProgress(pieceCount: picker.pieceCount,
+                                    pieceLength: Int64(torrent.pieceLength),
+                                    totalSize: torrent.totalSize,
+                                    fileEnds: layout.fileEnds,
+                                    verified: verifiedPieces)
+    }
+
+    /// Pure form of `computeSequentialFileProgress` — testable without a
+    /// session. For each file, walk pieces from the file's first byte and
+    /// accumulate overlap bytes while the intersecting pieces are verified;
+    /// stop at the first unverified piece.
+    static func sequentialFileProgress(pieceCount: Int,
+                                       pieceLength: Int64,
+                                       totalSize: Int64,
+                                       fileEnds: [Int64],
+                                       verified: Set<Int>) -> [Int64] {
+        var head = [Int64](repeating: 0, count: fileEnds.count)
+        guard !verified.isEmpty else { return head }
+        for file in 0..<fileEnds.count {
+            let fileStart = file == 0 ? 0 : fileEnds[file - 1]
+            let fileEnd = fileEnds[file]
+            var bytes: Int64 = 0
+            var piece = Int(fileStart / pieceLength)
+            while Int64(piece) * pieceLength < fileEnd {
+                guard verified.contains(piece) else { break }
+                let pStart = Int64(piece) * pieceLength
+                let pEnd = min(pStart + pieceLength, totalSize)
+                let overlapStart = max(pStart, fileStart)
+                let overlapEnd = min(pEnd, fileEnd)
+                if overlapStart < overlapEnd {
+                    bytes += overlapEnd - overlapStart
+                }
+                piece += 1
+            }
+            head[file] = bytes
+        }
+        return head
     }
 
     // MARK: - Helpers

@@ -338,7 +338,11 @@ struct FakeMSEPeer {
     private static let wrongInfoHash = hex("000102030405060708090a0b0c0d0e0f10111213")
 
     private static func btHandshake(infoHash: [UInt8], peerID: [UInt8]) -> [UInt8] {
-        [19] + Array("BitTorrent protocol".utf8) + [UInt8](repeating: 0, count: 8) + infoHash + peerID
+        // BEP 10 extension support (reserved byte 5, bit 0x10) — a modern
+        // client advertises it; the test fixture mirrors production.
+        var reserved = [UInt8](repeating: 0, count: 8)
+        reserved[5] = 0x10
+        return [19] + Array("BitTorrent protocol".utf8) + reserved + infoHash + peerID
     }
 
     private static func be32(_ bytes: [UInt8]) -> UInt32 {

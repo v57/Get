@@ -115,8 +115,11 @@ private let exampleInfoHash = hex("9fbb17d030f7f5c51310fa49319eb28a30eb3329")
 private let testPeerID = hex("2d474554303030302d4d53453030303030303031")
 
 /// The 68-byte BitTorrent handshake as it appears inside MSE's encrypted IA.
+/// Advertises BEP 10 (reserved byte 5, bit 0x10), matching production.
 private func btHandshakeBytes(infoHash: [UInt8], peerID: [UInt8]) -> [UInt8] {
-    [19] + Array("BitTorrent protocol".utf8) + [UInt8](repeating: 0, count: 8) + infoHash + peerID
+    var reserved = [UInt8](repeating: 0, count: 8)
+    reserved[5] = 0x10
+    return [19] + Array("BitTorrent protocol".utf8) + reserved + infoHash + peerID
 }
 
 @Test func testFullHandshakeAgainstFakePeer() async throws {
@@ -234,4 +237,30 @@ private func btHandshakeBytes(infoHash: [UInt8], peerID: [UInt8]) -> [UInt8] {
 
     let peerResult = try await peerTask.value
     #expect(peerResult.receivedPublicKey == pub)
+}
+
+// MARK: - Responder role (inbound)
+
+/// The production responder (`MSEHandshake.accept`) must interoperate with
+/// the production initiator (`MSEHandshake.run`): two independent MSEHandshake
+/// instances over a loopback pipe, one playing each role, must complete a
+/// full handshake. (No post-handshake byte exchange — that is a test-only
+/// alignment check in FakeMSEPeer; the real protocol goes straight to wire
+/// messages.)
+@Test func testResponderRoleInteropsWithInitiator() async throws {
+    let pipe = LoopbackPipe()
+    let responderID = hex("2d474554303030302d524553504f4e4445523031")
+    let initiator = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(testPeerID))
+    let responder = MSEHandshake(infoHash: Data(exampleInfoHash), peerID: Data(responderID))
+
+    let responderTask = Task {
+        try await responder.accept(over: pipe.responder, timeout: .seconds(10))
+    }
+    let initiatorResult = try await initiator.run(over: pipe.initiator, timeout: .seconds(10))
+    let responderResult = try await responderTask.value
+
+    // The responder saw the initiator's handshake with the initiator's peer
+    // id; the initiator saw the responder's handshake with the responder id.
+    #expect(responderResult.peerHandshakeBytes == Data(btHandshakeBytes(infoHash: exampleInfoHash, peerID: testPeerID)))
+    #expect(initiatorResult.peerHandshakeBytes == Data(btHandshakeBytes(infoHash: exampleInfoHash, peerID: responderID)))
 }

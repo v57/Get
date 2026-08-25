@@ -173,3 +173,150 @@ private func removeResumeState(infoHash: Data) {
             "resumed pieceVerified events are not contiguous from the resume point: \(resumedPieces)")
     #expect(try Data(contentsOf: dir.appendingPathComponent("resume.bin")) == content)
 }
+
+/// A resume state that claims pieces verified whose data is NOT actually on
+/// disk (the stale-claim corruption: a piece recorded as verified before its
+/// bytes were written, or a file region overwritten since) must not be
+/// trusted. The session re-verifies and falls back to fetching from piece 0.
+@Test func staleResumeClaimsAreNotTrusted() async throws {
+    let content = makeContent(256 * 1024)  // 16 pieces @ 16 KiB
+    let pieceLength = 16 * 1024
+    let seeder = try FakeSeeder(content: content, pieceLength: pieceLength,
+                                infoHash: [UInt8](repeating: 0xCD, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8))
+    defer { seeder.stop() }
+    let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+    let bundle = try SyntheticTorrent.make(data: content, pieceLength: pieceLength,
+                                           name: "stale.bin",
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+    let dir = try makeTempDir("stale")
+    defer { removeTempDir(dir) }
+    defer { removeResumeState(infoHash: bundle.torrent.infoHash) }
+    _ = SocketSignalSetup.installed
+
+    // The data file exists at the exact torrent length (so resumeDataFilesPresent
+    // passes) but its content is all zeros — the file was preallocated and the
+    // claimed pieces were never actually written (or were truncated since).
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+    let url = dir.appendingPathComponent("stale.bin")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fd = open(url.path, O_CREAT | O_RDWR, 0o644)
+    guard fd >= 0 else { Issue.record("cannot create stale data file"); return }
+    ftruncate(fd, off_t(content.count))
+    Darwin.close(fd)
+
+    // Corrupt state: claims pieces 0..<12 verified, but the disk has zeros.
+    let bogus = ResumeState(pieceLength: pieceLength,
+                            totalSize: Int64(content.count),
+                            verified: Array(0..<12))
+    bogus.save(infoHash: bundle.torrent.infoHash)
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    try await session.start()
+
+    var verified: [Int] = []
+    var completed = false
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(15))
+    for await event in events {
+        if case .pieceVerified(let index) = event { verified.append(index) }
+        if case .state(let s) = event, s == .completed { completed = true; break }
+        if clock.now > deadline { break }
+    }
+
+    #expect(completed, "download did not complete")
+    // The stale claims must NOT be trusted: the session re-fetches everything
+    // from piece 0 (any claimed-but-zero piece would be re-fetched).
+    #expect(verified == Array(0..<bundle.torrent.pieceHashes.count),
+            "session trusted stale resume claims and skipped pieces: \\(verified)")
+    #expect(try Data(contentsOf: url) == content)
+}
+
+// MARK: - Peer slot exhaustion
+
+/// Grab a currently-free TCP port and immediately release it: connecting
+/// there deterministically fails with connection-refused (localhost).
+private func grabDeadPort() -> UInt16 {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    precondition(fd >= 0)
+    defer { Darwin.close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = 0
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let bound = withUnsafePointer(to: &addr) { p in
+        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+            bind(fd, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    precondition(bound == 0)
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    var out = sockaddr_in()
+    let named = withUnsafeMutablePointer(to: &out) { p in
+        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+            getsockname(fd, sp, &len)
+        }
+    }
+    precondition(named == 0)
+    return UInt16(bigEndian: out.sin_port)
+}
+
+/// A peer endpoint whose connect FAILS (refused) must free its session slot.
+/// Cleanup used to live only inside peerLoop's defer — which never runs when
+/// `connection.start()` throws — so every failed endpoint leaked its slot
+/// permanently. A tracker that keeps sampling dead endpoints then starves the
+/// session: once `maxPeers` DISTINCT bad endpoints had been seen, the real
+/// seeder in a later announce batch could never be spawned ("Downloading",
+/// peers 0, nothing progresses). This reproduces exactly that shape: two dead
+/// endpoints fill `maxPeers`, the live seeder only appears via re-announce.
+@Test func failedConnectsFreePeerSlotsForLaterAnnounces() async throws {
+    let content = makeContent(256 * 1024)  // 16 pieces @ 16 KiB
+    let pieceLength = 16 * 1024
+    let seeder = try FakeSeeder(content: content, pieceLength: pieceLength,
+                                infoHash: [UInt8](repeating: 0xEF, count: 20),
+                                peerID: Array("-FAKE_SEEDER-0000000".utf8))
+    defer { seeder.stop() }
+
+    // Two guaranteed-dead local ports; the tracker announces them FIRST, the
+    // live seeder LAST (per-announce order is preserved by the engine).
+    let deadA = grabDeadPort()
+    let deadB = grabDeadPort()
+    var announced = compactPeer(port: deadA) + compactPeer(port: deadB)
+    announced += compactPeer(port: seeder.port)
+
+    // interval 1 → the tracker loop re-announces every second, so the live
+    // peer gets its chance only after the dead ones have failed AND freed
+    // their slots (the old leak made that impossible).
+    let tracker = try FakeTracker(peers: announced, interval: 1)
+    let bundle = try SyntheticTorrent.make(data: content, pieceLength: pieceLength,
+                                           name: "slots.bin",
+                                           announce: tracker.url.absoluteString)
+    seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+    defer { removeResumeState(infoHash: bundle.torrent.infoHash) }
+    _ = SocketSignalSetup.installed
+
+    let dir = try makeTempDir("slots")
+    defer { removeTempDir(dir) }
+    var settings = TorrentSettings()
+    settings.saveDirectory = dir
+    settings.maxPeers = 2  // exactly consumed by the two dead endpoints
+
+    let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+    let events = await session.events
+    try await session.start()
+
+    var completed = false
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(20))
+    for await event in events {
+        if case .state(let s) = event, s == .completed { completed = true; break }
+        if clock.now > deadline { break }
+    }
+
+    #expect(completed, "session stalled: failed-connect peers consumed the limited peer slots")
+    #expect(try Data(contentsOf: dir.appendingPathComponent("slots.bin")) == content)
+}

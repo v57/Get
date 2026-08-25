@@ -149,6 +149,50 @@ private func makeTwoFileWriter(pieceLength: Int = 64) throws -> (DiskWriter, Fil
     #expect(onDisk.subdata(in: 0..<(16 * 1024)) == piece0)
 }
 
+// MARK: - read(piece:)
+
+@Test func readReturnsExactlyWrittenPiece() async throws {
+    let content = Data((0..<40_000).map { UInt8($0 % 251) })
+    let (writer, layout) = try makeSingleFileWriter(content: content)
+    defer { try? FileManager.default.removeItem(at: layout.baseDirectory) }
+    try await writer.prepare()
+
+    let piece0 = content.subdata(in: 0..<16 * 1024)
+    try await writer.write(piece: 0, data: piece0)
+
+    let back = try await writer.read(piece: 0)
+    #expect(back == piece0, "read(piece:) did not return the exact written bytes")
+
+    // The unwritten piece 1 reads back as its preallocated zeros (this is
+    // what lets resume re-verification catch stale claims).
+    let piece1 = try await writer.read(piece: 1)
+    #expect(piece1.count == 16 * 1024)
+    #expect(piece1.allSatisfy { $0 == 0 })
+}
+
+@Test func readShortLastPieceAndStraddle() async throws {
+    let (writer, layout, content) = try makeTwoFileWriter() // 200 B, 64 B pieces
+    defer { try? FileManager.default.removeItem(at: layout.baseDirectory) }
+    try await writer.prepare()
+
+    // Piece 1 straddles a.bin/b.bin; piece 3 is the short last piece.
+    try await writer.write(piece: 1, data: content.subdata(in: 64..<128))
+    try await writer.write(piece: 3, data: content.subdata(in: 192..<200))
+
+    #expect(try await writer.read(piece: 1) == content.subdata(in: 64..<128))
+    #expect(try await writer.read(piece: 3) == content.subdata(in: 192..<200))
+}
+
+@Test func readOutOfRangeThrows() async throws {
+    let (writer, layout) = try makeSingleFileWriter(content: Data(repeating: 0x01, count: 40_000))
+    defer { try? FileManager.default.removeItem(at: layout.baseDirectory) }
+    try await writer.prepare()
+
+    await #expect(throws: (any Error).self) {
+        _ = try await writer.read(piece: 10)   // only 3 pieces
+    }
+}
+
 // MARK: - close()
 
 @Test func closeFlushesWrites() async throws {

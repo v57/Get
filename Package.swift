@@ -4,29 +4,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "Get",
-    platforms: [
-        .macOS(.v13),
-    ],
-    products: [
-        .library(
-            name: "Torrent",
-            targets: ["Torrent"]
-        ),
-    ],
-    targets: [
-        .target(
-            name: "Torrent",
-            swiftSettings: [
-                .enableUpcomingFeature("ApproachableConcurrency"),
-            ],
-        ),
-        .testTarget(
-            name: "TorrentTests",
-            dependencies: ["Torrent"],
-            swiftSettings: [
-                .enableUpcomingFeature("ApproachableConcurrency"),
-            ],
-        ),
-    ]
-)
+  name: "Get", platforms: [.macOS(.v13)],
+  products: [.library(name: "Torrent", targets: ["Torrent"])],
+  targets: [
+    .target(name: "Torrent", swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+    .testTarget(
+      name: "TorrentTests", dependencies: ["Torrent"],
+      swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+  ])

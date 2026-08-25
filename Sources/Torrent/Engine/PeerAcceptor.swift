@@ -4,8 +4,8 @@ import os
 
 /// Errors thrown by `PeerAcceptor`.
 public enum PeerAcceptorError: Error, Sendable {
-    /// The NWListener could not bind to the requested port.
-    case bindFailed(String)
+  /// The NWListener could not bind to the requested port.
+  case bindFailed(String)
 }
 
 /// Accepts inbound TCP connections for one torrent and turns each into a
@@ -25,115 +25,104 @@ public enum PeerAcceptorError: Error, Sendable {
 /// (connections are refused, no state callbacks fire). Resolve the bound
 /// port inside the single `.ready` callback instead.
 public actor PeerAcceptor {
-    private let infoHash: Data
-    private let peerID: Data
-    private let encryptedOnly: Bool
-    private let connectTimeout: Duration
-    private let readTimeout: Duration
-    private let onConnection: @Sendable (PeerConnection) async -> Void
+  private let infoHash: Data
+  private let peerID: Data
+  private let encryptedOnly: Bool
+  private let connectTimeout: Duration
+  private let readTimeout: Duration
+  private let onConnection: @Sendable (PeerConnection) async -> Void
 
-    private var listener: NWListener?
-    private var acceptTask: Task<Void, Never>?
-    private var boundPort: UInt16 = 0
+  private var listener: NWListener?
+  private var acceptTask: Task<Void, Never>?
+  private var boundPort: UInt16 = 0
 
-    /// Create an acceptor. `onConnection` is invoked (on the actor) for every
-    /// inbound connection that completes the MSE responder handshake.
-    public init(infoHash: Data, peerID: Data,
-                encryptedOnly: Bool = true,
-                connectTimeout: Duration = .seconds(20),
-                readTimeout: Duration = .seconds(90),
-                onConnection: @escaping @Sendable (PeerConnection) async -> Void) {
-        precondition(infoHash.count == 20, "infoHash must be 20 bytes")
-        precondition(peerID.count == 20, "peerID must be 20 bytes")
-        self.infoHash = infoHash
-        self.peerID = peerID
-        self.encryptedOnly = encryptedOnly
-        self.connectTimeout = connectTimeout
-        self.readTimeout = readTimeout
-        self.onConnection = onConnection
+  /// Create an acceptor. `onConnection` is invoked (on the actor) for every
+  /// inbound connection that completes the MSE responder handshake.
+  public init(
+    infoHash: Data, peerID: Data, encryptedOnly: Bool = true,
+    connectTimeout: Duration = .seconds(20), readTimeout: Duration = .seconds(90),
+    onConnection: @escaping @Sendable (PeerConnection) async -> Void
+  ) {
+    precondition(infoHash.count == 20, "infoHash must be 20 bytes")
+    precondition(peerID.count == 20, "peerID must be 20 bytes")
+    self.infoHash = infoHash
+    self.peerID = peerID
+    self.encryptedOnly = encryptedOnly
+    self.connectTimeout = connectTimeout
+    self.readTimeout = readTimeout
+    self.onConnection = onConnection
+  }
+
+  /// The port the listener actually bound (useful when 0 was requested).
+  public func port() -> UInt16 { boundPort }
+
+  /// Bind the listener and start accepting. Throws `PeerAcceptorError` on
+  /// bind failure. The listener keeps accepting until `stop()`.
+  public func start(port: UInt16 = 6881) async throws {
+    guard listener == nil else { return }
+    let params = NWParameters.tcp
+    // Allow the port to be reused immediately after a stop/relaunch.
+    params.allowLocalEndpointReuse = true
+    let listener: NWListener
+    do { listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!) } catch {
+      throw PeerAcceptorError.bindFailed(String(describing: error))
     }
+    self.listener = listener
 
-    /// The port the listener actually bound (useful when 0 was requested).
-    public func port() -> UInt16 { boundPort }
-
-    /// Bind the listener and start accepting. Throws `PeerAcceptorError` on
-    /// bind failure. The listener keeps accepting until `stop()`.
-    public func start(port: UInt16 = 6881) async throws {
-        guard listener == nil else { return }
-        let params = NWParameters.tcp
-        // Allow the port to be reused immediately after a stop/relaunch.
-        params.allowLocalEndpointReuse = true
-        let listener: NWListener
-        do {
-            listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
-        } catch {
-            throw PeerAcceptorError.bindFailed(String(describing: error))
+    // Set BOTH handlers once, BEFORE start(), and never clear/replace the
+    // state handler (see the lifetime pitfall above). The bound port is
+    // resolved in the single .ready callback.
+    let resolved: UInt16 = await withCheckedContinuation {
+      (cont: CheckedContinuation<UInt16, Never>) in
+      listener.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+          Self.log.info("listener ready on \(listener.port?.rawValue ?? port, privacy: .public)")
+          cont.resume(returning: listener.port?.rawValue ?? port)
+        case .failed(let error):
+          Self.log.error("listener failed: \(String(describing: error), privacy: .public)")
+          cont.resume(returning: port)
+        default: break
         }
-        self.listener = listener
-
-        // Set BOTH handlers once, BEFORE start(), and never clear/replace the
-        // state handler (see the lifetime pitfall above). The bound port is
-        // resolved in the single .ready callback.
-        let resolved: UInt16 = await withCheckedContinuation { (cont: CheckedContinuation<UInt16, Never>) in
-            listener.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    Self.log.info("listener ready on \(listener.port?.rawValue ?? port, privacy: .public)")
-                    cont.resume(returning: listener.port?.rawValue ?? port)
-                case .failed(let error):
-                    Self.log.error("listener failed: \(String(describing: error), privacy: .public)")
-                    cont.resume(returning: port)
-                default:
-                    break
-                }
-            }
-            listener.newConnectionHandler = { [weak self] connection in
-                Self.log.info("inbound TCP connection received")
-                Task { await self?.handleInbound(connection) }
-            }
-            listener.start(queue: .global(qos: .utility))
-        }
-        boundPort = resolved
-
-        // Park task keeps the accept loop alive until stop() cancels it.
-        acceptTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(60))
-            }
-        }
+      }
+      listener.newConnectionHandler = { [weak self] connection in
+        Self.log.info("inbound TCP connection received")
+        Task { await self?.handleInbound(connection) }
+      }
+      listener.start(queue: .global(qos: .utility))
     }
+    boundPort = resolved
 
-    /// Stop accepting and cancel any in-flight accept.
-    public func stop() {
-        listener?.cancel()
-        listener = nil
-        acceptTask?.cancel()
-        acceptTask = nil
+    // Park task keeps the accept loop alive until stop() cancels it.
+    acceptTask = Task { while !Task.isCancelled { try? await Task.sleep(for: .seconds(60)) } }
+  }
+
+  /// Stop accepting and cancel any in-flight accept.
+  public func stop() {
+    listener?.cancel()
+    listener = nil
+    acceptTask?.cancel()
+    acceptTask = nil
+  }
+
+  // MARK: - Inbound handling
+
+  /// Run the MSE responder handshake over an accepted connection, then hand
+  /// the established `PeerConnection` to the caller. Failures (plaintext
+  /// peer, bad handshake, timeout) just close the connection.
+  private func handleInbound(_ connection: NWConnection) async {
+    let peer = PeerConnection(
+      accepted: connection, infoHash: infoHash, peerID: peerID, encryptedOnly: encryptedOnly,
+      connectTimeout: connectTimeout, readTimeout: readTimeout)
+    do { try await peer.start() } catch {
+      Self.log.error("inbound handshake failed: \(String(describing: error), privacy: .public)")
+      await peer.close()
+      return
     }
+    let remoteID = await peer.remotePeerIDHex()
+    Self.log.info("accepted MSE peer \(remoteID, privacy: .public)")
+    await onConnection(peer)
+  }
 
-    // MARK: - Inbound handling
-
-    /// Run the MSE responder handshake over an accepted connection, then hand
-    /// the established `PeerConnection` to the caller. Failures (plaintext
-    /// peer, bad handshake, timeout) just close the connection.
-    private func handleInbound(_ connection: NWConnection) async {
-        let peer = PeerConnection(accepted: connection,
-                                  infoHash: infoHash,
-                                  peerID: peerID,
-                                  encryptedOnly: encryptedOnly,
-                                  connectTimeout: connectTimeout,
-                                  readTimeout: readTimeout)
-        do {
-            try await peer.start()
-        } catch {
-            Self.log.error("inbound handshake failed: \(String(describing: error), privacy: .public)")
-            await peer.close()
-            return
-        }
-        let remoteID = await peer.remotePeerIDHex()
-        Self.log.info("accepted MSE peer \(remoteID, privacy: .public)")
-        await onConnection(peer)
-    }
-
-    private static let log = Logger(subsystem: "dev.v57.get", category: "engine")
+  private static let log = Logger(subsystem: "dev.v57.get", category: "engine")
 }

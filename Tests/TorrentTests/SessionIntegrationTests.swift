@@ -409,10 +409,20 @@ private func waitForState(
   await session.pause()
   #expect(await session.currentState() == .paused)
 
-  // In-flight requests (up to the pipeline depth) still land and complete;
-  // wait for them to drain, then no NEW requests may arrive while paused.
-  try await Task.sleep(for: .milliseconds(250))
-  let pausedRequests = seeder.requestedPieces.count
+  // The client sends its whole pipeline up front (all requests go out
+  // before the pause lands); FakeSeeder records them at serveDelay speed,
+  // so `requestedPieces` keeps rising for a moment after pause even though
+  // NO new requests are sent. Wait until the seeder has recorded every
+  // pre-pause request, then assert nothing further arrives while paused.
+  var pausedRequests = -1
+  let settle = clock.now.advanced(by: .seconds(5))
+  while clock.now < settle {
+    let n = seeder.requestedPieces.count
+    if n == pausedRequests { break }  // stable for one poll interval
+    pausedRequests = n
+    try await Task.sleep(for: .milliseconds(100))
+  }
+  #expect(pausedRequests > 0, "no piece was ever requested before pause")
   try await Task.sleep(for: .milliseconds(400))
   #expect(seeder.requestedPieces.count == pausedRequests, "requests continued while paused")
 

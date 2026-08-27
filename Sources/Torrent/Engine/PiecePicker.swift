@@ -152,6 +152,14 @@ public struct PiecePicker: Sendable {
     peerHas[peer] = nil
   }
 
+  /// Remove all in-flight pending blocks for a peer (e.g. on pause) so the
+  /// download stops fetching them; on resume they can be re-requested.
+  /// Received (buffered) blocks are kept so already-downloaded data is not
+  /// re-fetched.
+  public mutating func clearPending(on peer: PeerID) {
+    pending[peer] = nil
+  }
+
   /// A piece was verified: the cursor moves past it in fetch order (never
   /// backwards), and its received-block bookkeeping is dropped (the piece
   /// is done). Pieces not in the fetch order are ignored.

@@ -167,6 +167,14 @@ public enum PeerEvent: Sendable {
 public actor TorrentSession {
   public static let log = Logger(subsystem: "dev.v57.get", category: "engine")
 
+  /// Drop a peer that holds a requested block past this age. A peer that
+  /// keeps delivering OTHER blocks but silently withholds one request
+  /// freezes the sequential download (the cursor can't advance past an
+  /// unassembled piece), and the 90 s read timeout never fires because the
+  /// peer is still sending. Freeing its blocks lets them be re-requested
+  /// elsewhere.
+  private static let blockStallTimeout: TimeInterval = 60
+
   private let torrent: TorrentFile
   private let settings: TorrentSettings
   private let ourPeerID: Data
@@ -270,7 +278,7 @@ public actor TorrentSession {
 
   // MARK: - Lifecycle
 
-  public func start() async throws {
+  public func start(initiallyPaused: Bool = false) async throws {
     guard state == .stopped else { return }
     // Seed resume state before prepare(): a resume is only valid when the
     // data files already exist in the save directory, and prepare() would
@@ -286,8 +294,17 @@ public actor TorrentSession {
     }
 
     try await disk.prepare()
-    state = .downloading
-    emit(.state(.downloading))
+    // A session restored already-paused brings the engine up (resume state
+    // loaded, disk prepared, listener bound, one announce) but stays idle:
+    // the peer spawn + discovery loops guard on `state == .downloading`, and
+    // resume() flips the flag and re-spawns the pool.
+    if initiallyPaused {
+      paused = true
+      state = .paused
+    } else {
+      state = .downloading
+    }
+    emit(.state(state))
     startStatsLoop()
 
     // Bind the inbound listener BEFORE announcing so the advertised port
@@ -319,6 +336,13 @@ public actor TorrentSession {
       dhtTask = Task {
         await dht.bootstrap()
         while !Task.isCancelled {
+          // No discovery while paused/completed — peer spawn is download-only,
+          // and a paused download shouldn't burn DHT queries for peers it
+          // won't fetch. Poll periodically so a state change is picked up.
+          guard state == .downloading else {
+            try? await Task.sleep(for: .seconds(5))
+            continue
+          }
           let found = await dht.getPeers(infoHash: torrent.infoHash)
           let peers = found.map { TrackerPeer(host: $0.ip, port: $0.port) }
           if !peers.isEmpty {
@@ -341,6 +365,23 @@ public actor TorrentSession {
     paused = true
     state = .paused
     emit(.state(.paused))
+    // Stop in-flight traffic decisively: ask each peer to drop the blocks we
+    // queued and free the picker's pending slots so nothing more is fetched.
+    // (Blocks that already reached us still complete and verify — that keeps
+    // the resume state truthful.) With nothing pending, the peer loop drops
+    // into its short idle poll and sits quiet until resume.
+    // Snapshot the dict: each cancel awaits, and actor reentrancy can remove
+    // a peer's entry mid-iteration (a disconnect is processed in an await),
+    // so iterating the live dict would be "mutated while enumerated".
+    let peerSnapshot = peers
+    for (key, connection) in peerSnapshot {
+      let pending = picker.pending[key] ?? []
+      for block in pending {
+        let length = min(settings.blockSize, picker.pieceSize(of: block.piece) - block.begin)
+        try? await connection.send(.cancel(index: block.piece, begin: block.begin, length: length))
+      }
+      picker.clearPending(on: key)
+    }
     saveResumeState()
   }
 
@@ -349,6 +390,11 @@ public actor TorrentSession {
     paused = false
     state = .downloading
     emit(.state(.downloading))
+    // A paused session held its peer pool back (spawnPeerTasks only runs
+    // while downloading). Re-put the tracked pool on the wire so the
+    // download resumes promptly rather than waiting for the next 60s/90s
+    // discovery tick. Peers still connected are skipped (already spawned).
+    spawnPeerTasks(for: announcedPeers)
   }
 
   public func cancel() async {
@@ -549,6 +595,10 @@ public actor TorrentSession {
   // MARK: - Peers
 
   private func spawnPeerTasks(for announced: [TrackerPeer]) {
+    // Only hand out peers while the download is actually running: a peer
+    // spawned while paused/completed would just connect and sit idle. A
+    // paused session re-spawns the pool on resume().
+    guard state == .downloading else { return }
     for peer in announced where peerTasks.count < settings.maxPeers {
       let key = Self.peerKey(host: peer.host, port: peer.port)
       guard peerTasks[key] == nil, !spawnedPeers.contains(key) else { continue }
@@ -607,9 +657,18 @@ public actor TorrentSession {
     var choked = true
     var sentOurBitfield = false
     var loggedNoUpload = false
+    // When each in-flight block was requested, so a peer that silently
+    // withholds one block can be dropped (see blockStallTimeout).
+    var requestAges: [PiecePicker.BlockKey: Date] = [:]
 
     defer {
       picker.disconnect(key)
+      // A peer that reached the wire loop is re-eligible for the pool once
+      // it goes away. Otherwise spawnedPeers grows forever and discovery
+      // starves: the tracker/DHT feed a finite address set, and once every
+      // address is "seen" nothing can reconnect after the active peers
+      // churn out — the download stalls mid-file until an app restart.
+      spawnedPeers.remove(key)
       peers[key] = nil
       peerTasks[key] = nil
       peerRates[key] = nil
@@ -633,6 +692,23 @@ public actor TorrentSession {
       peerRates[key] = rateTracker
 
       while !Task.isCancelled {
+        // While paused we're not requesting, so drop request-age
+        // bookkeeping; otherwise resume would see stale ages and drop the
+        // peer before it can serve anything.
+        if paused {
+          requestAges.removeAll()
+        } else if let stale = requestAges.first(where: {
+          Date().timeIntervalSince($0.value) > Self.blockStallTimeout
+        }) {
+          // A requested block that hasn't arrived in a long time: the peer
+          // may be alive but silently withholding it (the read idle timeout
+          // never fires because the peer keeps sending other blocks). Drop
+          // the peer so its whole pipeline is freed for re-request.
+          Self.log.info(
+            "\(label, privacy: .public) block \(stale.key.piece):\(stale.key.begin) stalled past \(Self.blockStallTimeout, privacy: .public)s — dropping peer"
+          )
+          break
+        }
         // Re-sync the rate tracker with what handlePiece recorded
         // (it lives on the actor; this loop's local copy goes stale).
         rateTracker = peerRates[key] ?? rateTracker
@@ -642,7 +718,10 @@ public actor TorrentSession {
           let depth = rateTracker.pipelineDepth(
             blockSize: settings.blockSize, min: settings.pipelinePerPeer,
             max: settings.maxPipelinePerPeer)
-          while let block = picker.request(for: key, pipeline: depth) {
+          while !paused,
+            let block = picker.request(for: key, pipeline: depth)
+          {
+            requestAges[PiecePicker.BlockKey(piece: block.piece, begin: block.begin)] = Date()
             try await connection.send(
               .request(index: block.piece, begin: block.begin, length: block.length))
           }

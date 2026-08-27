@@ -80,6 +80,13 @@ import os
       .appendingPathComponent("Get/Torrents", isDirectory: true)
   }
 
+  /// Per-torrent "paused" marker, alongside the `.torrent` copy. Present →
+  /// the download must be restored already-paused on the next launch;
+  /// absent → restore as running. Written on pause, removed on resume.
+  private static func pausedMarkerURL(id: String) -> URL {
+    Self.torrentsDirectory.appendingPathComponent("\(id).paused")
+  }
+
   init() {
     // Reopen every torrent that was active in a previous run. Sessions
     // pick up the persisted resume state automatically (verified pieces
@@ -89,8 +96,12 @@ import os
         at: Self.torrentsDirectory, includingPropertiesForKeys: nil)) ?? []
     for url in files where url.pathExtension.lowercased() == "torrent" {
       // Errors (corrupt copy, missing data) must not spam the launch;
-      // a failed restore is just a skipped download.
-      Task { try? await openTorrent(url: url) }
+      // a failed restore is just a skipped download. Restore a download
+      // that was pre-marked paused (paused last session) as paused, so
+      // relaunching never resumes it.
+      let id = url.deletingPathExtension().lastPathComponent
+      let wasPaused = FileManager.default.fileExists(atPath: Self.pausedMarkerURL(id: id).path)
+      Task { try? await openTorrent(url: url, initiallyPaused: wasPaused) }
     }
     if !files.isEmpty { Self.log.info("Resuming \(files.count) saved download(s)") }
     Self.removeActiveDirectoryIfEmpty()
@@ -116,8 +127,11 @@ import os
     do { try await openTorrent(url: url) } catch { lastError = error.localizedDescription }
   }
 
-  /// Parse a `.torrent` file and start downloading it.
-  func openTorrent(url: URL) async throws {
+  /// Parse a `.torrent` file and start downloading it. When
+  /// `initiallyPaused` is true the session is brought up (resume state
+  /// loaded, files prepared) but left idle, so a download that was paused
+  /// last session stays paused on relaunch.
+  func openTorrent(url: URL, initiallyPaused: Bool = false) async throws {
     let torrent = try TorrentSession.parse(url: url)
     let id = torrent.infoHash.map { String(format: "%02x", $0) }.joined()
 
@@ -144,7 +158,9 @@ import os
     let files = torrent.files.enumerated().map { index, file in
       DownloadFileItem(index: index, path: file.path.joined(separator: "/"), length: file.length)
     }
-    items.append(DownloadItem(id: id, title: torrent.name, files: files))
+    items.append(
+      DownloadItem(id: id, title: torrent.name, state: initiallyPaused ? .paused : .stopped,
+        files: files))
 
     let task = Task { [weak self] in
       defer { self?.eventTasks[id] = nil }
@@ -152,7 +168,7 @@ import os
     }
     eventTasks[id] = task
 
-    do { try await session.start() } catch {
+    do { try await session.start(initiallyPaused: initiallyPaused) } catch {
       items.firstIndex { $0.id == id }.map { items[$0].error = error.localizedDescription }
       throw error
     }
@@ -168,6 +184,7 @@ import os
     guard let session = sessions.removeValue(forKey: itemID) else { return }
     Task { await session.cancel() }
     removeTorrentCopy(id: itemID)
+    removePausedMarker(id: itemID)
 
     if let index = items.firstIndex(where: { $0.id == itemID }) {
       items[index].state = .stopped
@@ -207,6 +224,7 @@ import os
 
     items.removeAll { $0.id == itemID }
     removeTorrentCopy(id: itemID)
+    removePausedMarker(id: itemID)
     try? FileManager.default.removeItem(at: ResumeState.fileURL(infoHashHex: itemID))
     Self.removeActiveDirectoryIfEmpty()
   }
@@ -217,6 +235,7 @@ import os
       items[index].state == .downloading
     else { return }
     items[index].state = .paused
+    persistPausedMarker(id: itemID)
     Task { await sessions[itemID]?.pause() }
   }
 
@@ -225,6 +244,7 @@ import os
     guard let index = items.firstIndex(where: { $0.id == itemID }), items[index].state == .paused
     else { return }
     items[index].state = .downloading
+    removePausedMarker(id: itemID)
     Task { await sessions[itemID]?.resume() }
   }
 
@@ -305,6 +325,19 @@ import os
   private func removeTorrentCopy(id: String) {
     try? FileManager.default.removeItem(
       at: Self.torrentsDirectory.appendingPathComponent("\(id).torrent"))
+  }
+
+  /// Record that a download is paused so a relaunch restores it as paused
+  /// (not running). Best effort — a failed write just means next launch
+  /// resumes the download instead.
+  private func persistPausedMarker(id: String) {
+    try? FileManager.default.createDirectory(
+      at: Self.torrentsDirectory, withIntermediateDirectories: true)
+    try? Data("paused".utf8).write(to: Self.pausedMarkerURL(id: id), options: .atomic)
+  }
+
+  private func removePausedMarker(id: String) {
+    try? FileManager.default.removeItem(at: Self.pausedMarkerURL(id: id))
   }
 
   // MARK: - Events

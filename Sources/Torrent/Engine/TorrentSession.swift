@@ -174,6 +174,13 @@ public actor TorrentSession {
   /// peer is still sending. Freeing its blocks lets them be re-requested
   /// elsewhere.
   private static let blockStallTimeout: TimeInterval = 60
+  // A peer with an empty pipeline and nothing requestable must not spin a
+  // 500ms timer forever (see blockStallTimeout above for why peers stall) —
+  // back off to a multi-second idle poll so a momentary swarm gap or a
+  // choked/blank peer doesn't burn a core. While paused we keep a fast poll
+  // so an unpause or priority change is noticed promptly.
+  private static let idlePollFast: Duration = .milliseconds(500)
+  private static let idlePollBackoff: Duration = .milliseconds(2500)
 
   private let torrent: TorrentFile
   private let settings: TorrentSettings
@@ -773,12 +780,19 @@ public actor TorrentSession {
 
         // When this peer has nothing in flight and nothing left to
         // request (paused, or all remaining pieces belong to paused
-        // files), don't block on receive forever — poll with a short
-        // timeout so resume/priority changes are picked up promptly.
+        // files), don't block on receive forever — poll so resume/priority
+        // changes are picked up. A momentarily-empty swarm (a peer with no
+        // requestable piece) must NOT spin a 500ms timer forever: back off
+        // to a multi-second idle poll. receiveMessageOrIdle returns as soon
+        // as any message arrives, so a responsive peer is never delayed —
+        // only a genuinely silent peer waits the full interval. A fast poll
+        // is kept while paused so an unpause/priority change is noticed
+        // promptly.
         let idle = picker.pending[key, default: []].isEmpty
         let message: WireMessage?
         if idle {
-          message = try await connection.receiveMessageOrIdle(timeout: .milliseconds(500))
+          let idleTimeout: Duration = paused ? Self.idlePollFast : Self.idlePollBackoff
+          message = try await connection.receiveMessageOrIdle(timeout: idleTimeout)
         } else {
           message = try await connection.receiveMessage()
         }

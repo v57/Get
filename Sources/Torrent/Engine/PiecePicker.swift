@@ -7,16 +7,17 @@ public struct PeerID: Sendable, Equatable, Hashable {
   public init(raw: Data) { self.raw = raw }
 }
 
-/// Strictly sequential piece picker.
+/// Soft-sequential piece picker.
 ///
 /// Blocks are handed out in fetch order (by default ascending piece order
 /// starting at the cursor), each peer is limited to `pipeline` outstanding
 /// blocks, and a block is never assigned to two peers at once (blocks in
-/// flight anywhere are excluded). If the cursor piece is available on no
-/// peer at all, no peer may skip ahead of it — `request` returns nil for
-/// everyone until availability appears. `setOrder` replaces the fetch
-/// sequence (e.g. a file-priority ordering); pieces not in the order are
-/// never requested.
+/// flight anywhere are excluded). A peer is assigned its earliest available
+/// piece at or after the cursor: when the cursor piece is held by some peer,
+/// that peer serves it first (it is the earliest in the scan), but a peer
+/// that lacks it may fetch a later piece rather than idling. `setOrder`
+/// replaces the fetch sequence (e.g. a file-priority ordering); pieces not
+/// in the order are never requested.
 public struct PiecePicker: Sendable {
   public let pieceCount: Int
   public let pieceLength: Int
@@ -52,8 +53,8 @@ public struct PiecePicker: Sendable {
   /// Pieces that have fully verified (SHA-1 matched and written). The picker
   /// must skip these when scanning — a piece can verify out of fetch order
   /// when a peer lacks the frontier but has later pieces. The frontier is
-  /// always the lowest non-completed piece in fetch order, so the strict gate
-  /// gates on the real next-needed piece, never past a gap.
+  /// always the lowest non-completed piece in fetch order, so it is always
+  /// the real next-needed piece, never past a gap.
   public private(set) var completed: Set<Int> = []
 
   public struct BlockKey: Hashable, Sendable {
@@ -107,15 +108,19 @@ public struct PiecePicker: Sendable {
   /// block that is not in flight anywhere. Respects the per-peer pipeline
   /// limit.
   ///
-  /// Returns nil when the peer is at its pipeline limit, has nothing to
-  /// fetch, or the cursor piece is available on no peer at all (strict
-  /// sequential: nobody skips ahead of an unavailable piece).
+  /// Returns nil when the peer is at its pipeline limit or has nothing
+  /// requestable at or after the cursor. The scan never skips a completed
+  /// piece, and the earliest piece the peer has (>= cursor) is served first
+  /// — soft sequential, so a momentarily-unheld frontier does not stall the
+  /// whole swarm.
   public mutating func request(for peer: PeerID, pipeline: Int) -> Block? {
     guard pending[peer, default: []].count < pipeline else { return nil }
     guard cursorPos < order.count else { return nil }
-    // Strict sequential semantics: if the cursor piece exists on no peer,
-    // no peer may skip past it.
-    guard peerHas.values.contains(where: { $0.contains(order[cursorPos]) }) else { return nil }
+    // Soft sequential: scan from the cursor. A peer WITH the frontier piece
+    // serves it first (it is the earliest piece in the scan); a peer that
+    // lacks it fetches the next available piece rather than idling. The
+    // strict gate that stalled every peer when the frontier was momentarily
+    // unheld is gone — a gap in the strict order must never stop the swarm.
     var pos = cursorPos
     while pos < order.count {
       let piece = order[pos]

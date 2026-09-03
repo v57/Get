@@ -40,7 +40,7 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
   #expect(picker.cursor == 0)
 }
 
-@Test func stallsWhenCursorPieceAvailableOnNoPeer() {
+@Test func fetchesAheadWhenCursorPieceUnavailableOnNoPeer() {
   var picker = makePicker()
   picker.advancePast(0)
   picker.advancePast(1)
@@ -48,16 +48,45 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
   picker.setAvailable(Set(4..<10), on: peerA)  // nobody has piece 3
   picker.setAvailable(Set(5..<10), on: peerB)
 
-  // Strict sequential: no peer may skip ahead of an unavailable cursor piece.
-  #expect(picker.request(for: peerA, pipeline: 4) == nil)
-  #expect(picker.request(for: peerB, pipeline: 4) == nil)
-  #expect(picker.cursor == 3)
-
-  // Once a peer announces piece 3, requests resume exactly at the cursor.
-  picker.setAvailable([3], on: peerA)
+  // Soft sequential: the frontier is unheld but later pieces are available,
+  // so a peer holding a later piece fetches ahead instead of stalling the
+  // whole swarm at 0 KB/s (the strict gate returned nil for everyone here).
   #expect(
     picker.request(for: peerA, pipeline: 4)
+      == PiecePicker.Block(piece: 4, begin: 0, length: 16 * 1024))
+  #expect(
+    picker.request(for: peerB, pipeline: 1)
+      == PiecePicker.Block(piece: 5, begin: 0, length: 16 * 1024))
+  #expect(picker.cursor == 3, "frontier stays at the unheld piece until it completes")
+
+  // Soft sequential still holds: once a peer announces the frontier piece,
+  // it serves it first (it is the earliest in the scan).
+  picker.setAvailable(Set(3..<10), on: peerA)
+  #expect(
+    picker.request(for: peerA, pipeline: 16)
       == PiecePicker.Block(piece: 3, begin: 0, length: 16 * 1024))
+}
+
+@Test func frontierUnheldDoesNotStarveSwarm() {
+  // Regression: the strict gate made request() return nil for EVERY peer
+  // when the cursor piece was held by no connected peer, stalling the whole
+  // swarm at 0 KB/s until a holder appeared. Soft sequential must keep the
+  // swarm moving: any peer that holds a still-needed later piece keeps it.
+  var picker = makePicker(pieceCount: 6)
+  picker.advancePast(0)
+  picker.advancePast(1)  // frontier == 2, no peer holds piece 2
+  picker.setAvailable(Set(3..<6), on: peerA)
+  picker.setAvailable(Set(3..<6), on: peerB)
+
+  // With the strict gate both peers returned nil and the download froze.
+  // Soft sequential: every peer with a later needed piece keeps fetching.
+  #expect(
+    picker.request(for: peerA, pipeline: 8)
+      == PiecePicker.Block(piece: 3, begin: 0, length: 16 * 1024))
+  #expect(
+    picker.request(for: peerB, pipeline: 8)
+      == PiecePicker.Block(piece: 4, begin: 0, length: 16 * 1024))
+  #expect(picker.cursor == 2, "frontier stays at the unheld piece")
 }
 
 // MARK: - Pipeline limiting

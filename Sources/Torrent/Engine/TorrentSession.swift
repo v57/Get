@@ -904,8 +904,20 @@ public actor TorrentSession {
       return
     }
 
+    let blockKey = PiecePicker.BlockKey(piece: index, begin: begin)
+    // ENDGAME / redundant fetch: the same block may be requested from more
+    // than one peer. Only the FIRST arrival is stored and hashed; any later
+    // duplicate (already buffered for this piece+begin) is idempotent — free
+    // this peer's pipeline slot (complete) but do NOT re-store or re-hash,
+    // so the piece assembles, verifies, and writes exactly once (no double
+    // disk write / pieceVerified emit). Duplicates only occur during the
+    // endgame window, while the piece is still assembling.
+    if pieceBuffers[index]?[begin] != nil {
+      picker.complete(blockKey, on: key)
+      return
+    }
     pieceBuffers[index, default: [:]][begin] = data
-    picker.complete(PiecePicker.BlockKey(piece: index, begin: begin), on: key)
+    picker.complete(blockKey, on: key)
 
     let blocks = picker.blockCount(of: index)
     guard pieceBuffers[index]?.count == blocks else { return }

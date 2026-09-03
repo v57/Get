@@ -24,6 +24,11 @@ public struct PiecePicker: Sendable {
   public let lastPieceLength: Int
   public var blockSize: Int = 16 * 1024
 
+  /// Number of still-missing blocks at which a piece enters endgame mode
+  /// (redundant last-block fetching). Matches the ~6-block threshold used by
+  /// libtorrent / Transmission. See `isEndgame(_:)`.
+  public var endgameThreshold: Int = 6
+
   /// Fetch order: the piece sequence handed out by `request`, front to
   /// back. Defaults to ascending `0..<pieceCount`; `setOrder` replaces it
   /// with any deduplicated subset of valid piece indices (typically a
@@ -127,16 +132,37 @@ public struct PiecePicker: Sendable {
       if completed.contains(piece) { pos += 1; continue }
       if peerHas[peer]?.contains(piece) == true {
         let blocks = blockCount(of: piece)
-        var inflight = Set<BlockKey>()
-        for set in pending.values { inflight.formUnion(set.filter { $0.piece == piece }) }
         let alreadyReceived = received[piece] ?? []
-        for b in 0..<blocks {
-          let key = BlockKey(piece: piece, begin: b * blockSize)
-          if !inflight.contains(key), !alreadyReceived.contains(key) {
-            pending[peer, default: []].insert(key)
-            return Block(
-              piece: piece, begin: key.begin,
-              length: min(blockSize, pieceSize(of: piece) - key.begin))
+        if isEndgame(piece) {
+          // ENDGAME: the piece is nearly complete — request its remaining
+          // blocks from this peer even when another peer already has them in
+          // flight, so a slow or dropped peer cannot strand the last few
+          // blocks. Only blocks already received, or already in flight on
+          // THIS peer, are excluded; blocks in flight on other peers are
+          // deliberately duplicated (redundancy is the point).
+          let ownPending = pending[peer] ?? []
+          for b in 0..<blocks {
+            let key = BlockKey(piece: piece, begin: b * blockSize)
+            if !alreadyReceived.contains(key), !ownPending.contains(key) {
+              pending[peer, default: []].insert(key)
+              return Block(
+                piece: piece, begin: key.begin,
+                length: min(blockSize, pieceSize(of: piece) - key.begin))
+            }
+          }
+        } else {
+          // NORMAL: a block is never assigned to two peers at once — exclude
+          // any block in flight anywhere and any block already received.
+          var inflight = Set<BlockKey>()
+          for set in pending.values { inflight.formUnion(set.filter { $0.piece == piece }) }
+          for b in 0..<blocks {
+            let key = BlockKey(piece: piece, begin: b * blockSize)
+            if !inflight.contains(key), !alreadyReceived.contains(key) {
+              pending[peer, default: []].insert(key)
+              return Block(
+                piece: piece, begin: key.begin,
+                length: min(blockSize, pieceSize(of: piece) - key.begin))
+            }
           }
         }
       }
@@ -207,6 +233,26 @@ public struct PiecePicker: Sendable {
   /// Number of blocks in `piece`.
   public func blockCount(of piece: Int) -> Int {
     (pieceSize(of: piece) + blockSize - 1) / blockSize
+  }
+
+  /// Number of still-missing blocks in `piece` (blocks not yet received).
+  public func missingBlockCount(of piece: Int) -> Int {
+    blockCount(of: piece) - (received[piece]?.count ?? 0)
+  }
+
+  /// A piece is in endgame when it is genuinely near complete: it has more
+  /// blocks than `endgameThreshold` in total AND only `endgameThreshold` or
+  /// fewer blocks still missing.
+  ///
+  /// The `blockCount > endgameThreshold` guard keeps a piece too small to
+  /// benefit from redundancy (e.g. a 2-block piece, or the tiny fixtures in
+  /// the unit tests) in the normal one-peer-per-block path — a piece with
+  /// nothing, or almost nothing, received is not "near complete", it is just
+  /// starting. Endgame state is DERIVED from `received`, so `resetReceived`
+  /// clears it naturally: a hash-mismatched piece re-fetches from scratch
+  /// instead of staying in endgame.
+  public func isEndgame(_ piece: Int) -> Bool {
+    blockCount(of: piece) > endgameThreshold && missingBlockCount(of: piece) <= endgameThreshold
   }
 
   /// Byte length of `piece` (the last piece may be shorter).

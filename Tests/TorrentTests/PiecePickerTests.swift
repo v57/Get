@@ -419,3 +419,98 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
     picker.request(for: peerA, pipeline: 4)
       == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
 }
+
+// MARK: - Endgame (redundant last-block fetching)
+
+@Test func endgameNearCompletePieceHandedToTwoPeers() {
+  // A near-complete piece (6 of 8 blocks received, 2 missing) is handed to
+  // TWO peers at once: the same remaining block is duplicated across peers,
+  // so a slow or dropped holder cannot strand the last few blocks. This is
+  // the redundancy libtorrent / Transmission use — the no-double-assignment
+  // rule is relaxed specifically for endgame pieces. Piece 1 (nothing
+  // received) must stay in the normal one-peer-per-block path.
+  var picker = makePicker(pieceCount: 2, pieceLength: 16 * 1024 * 8)  // 8 blocks/piece
+  picker.setAllAvailable(on: peerA)
+  picker.setAllAvailable(on: peerB)
+
+  // Receive blocks 0-5 of piece 0 (missing: 6, 7 → endgame).
+  for b in 0..<6 {
+    picker.complete(PiecePicker.BlockKey(piece: 0, begin: b * 16_384), on: peerA)
+  }
+  #expect(picker.isEndgame(0), "piece 0 (2 of 8 blocks missing) must be in endgame")
+  #expect(!picker.isEndgame(1), "piece 1 (nothing received) must NOT be in endgame")
+
+  // A requests its earliest missing block → block 6.
+  #expect(
+    picker.request(for: peerA, pipeline: 8)
+      == PiecePicker.Block(piece: 0, begin: 6 * 16_384, length: 16 * 1024))
+
+  // B requests the SAME block (6) — redundancy across peers. In non-endgame
+  // mode B would have been handed block 7 (block 6 is in flight on A);
+  // endgame deliberately duplicates it.
+  #expect(
+    picker.request(for: peerB, pipeline: 8)
+      == PiecePicker.Block(piece: 0, begin: 6 * 16_384, length: 16 * 1024))
+}
+
+@Test func endgameDuplicateCompletionIsIdempotent() {
+  // Endgame hands the same block to two peers. Completing the copy that
+  // arrives at the SECOND peer must be a no-op on the received set (the
+  // block is already buffered) while still freeing that peer's pipeline
+  // slot — the session's handlePiece relies on this to avoid re-storing or
+  // re-hashing the same block (no double disk write / pieceVerified emit).
+  var picker = makePicker(pieceCount: 1, pieceLength: 16 * 1024 * 8)  // 8 blocks
+  picker.setAllAvailable(on: peerA)
+  picker.setAllAvailable(on: peerB)
+
+  for b in 0..<6 { picker.complete(PiecePicker.BlockKey(piece: 0, begin: b * 16_384), on: peerA) }
+  _ = picker.request(for: peerA, pipeline: 8)  // A gets block 6
+  let b6 = PiecePicker.BlockKey(piece: 0, begin: 6 * 16_384)
+  #expect(
+    picker.request(for: peerB, pipeline: 8)
+      == PiecePicker.Block(piece: 0, begin: b6.begin, length: 16 * 1024),
+    "B is handed the same block 6 (endgame redundancy)")
+  #expect(picker.pending[peerA, default: []].contains(b6))
+  #expect(picker.pending[peerB, default: []].contains(b6))
+
+  // Block 6 arrives from A first: stored, marked received, A's slot freed.
+  picker.complete(b6, on: peerA)
+  #expect(picker.received[0]!.contains(b6))
+  #expect(!picker.pending[peerA, default: []].contains(b6))
+
+  // Block 6 DUPLICATE arrives from B: a no-op on the received set (still
+  // exactly one entry for the block), and B's slot is freed.
+  let before = picker.received[0]
+  picker.complete(b6, on: peerB)
+  #expect(picker.received[0] == before, "duplicate completion must not change the received set")
+  #expect(picker.received[0]!.count == 7, "block 6 counted exactly once")
+  #expect(!picker.pending[peerB, default: []].contains(b6))
+
+  // The buffered block is never re-requested; the next missing block is 7.
+  #expect(
+    picker.request(for: peerA, pipeline: 8)
+      == PiecePicker.Block(piece: 0, begin: 7 * 16_384, length: 16 * 1024))
+}
+
+@Test func endgameStateResetsOnHashMismatch() {
+  // A hash-mismatched piece must leave endgame and re-fetch from scratch:
+  // resetReceived clears the derived endgame state and drops every buffered
+  // block mark so the whole piece becomes requestable again. Endgame state
+  // is derived, so it must never leak into completed/frontier semantics.
+  var picker = makePicker(pieceCount: 1, pieceLength: 16 * 1024 * 8)  // 8 blocks
+  picker.setAllAvailable(on: peerA)
+
+  for b in 0..<6 { picker.complete(PiecePicker.BlockKey(piece: 0, begin: b * 16_384), on: peerA) }
+  #expect(picker.isEndgame(0))
+
+  // Hash mismatch — the session clears the buffers and resets the piece.
+  picker.resetReceived(0)
+  #expect(picker.received[0] == nil)
+  #expect(!picker.isEndgame(0), "a reset piece is no longer in endgame")
+  #expect(picker.missingBlockCount(of: 0) == 8)
+
+  // The piece re-fetches from block 0 — every block requestable again.
+  #expect(
+    picker.request(for: peerA, pipeline: 8)
+      == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+}

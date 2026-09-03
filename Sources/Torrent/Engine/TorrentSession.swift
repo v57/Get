@@ -218,6 +218,13 @@ public actor TorrentSession {
   /// Seed/leech counts from the last successful announce (tracker-reported).
   private var trackerSeeders: Int?
   private var trackerLeechers: Int?
+  /// Diagnostics: frontier-progress tracking for the `DIAG` + `NO-PROGRESS`
+  /// log lines (a 60s+ frontier stall is what a stuck download looks like).
+  /// Reset whenever a piece verifies; `diagStallSince` marks when progress
+  /// first stopped so a log line can say how long it has sat.
+  private var diagProgressLastCount = -1
+  private var diagStallSince: Date?
+  private var diagTicks = 0
 
   public init(torrent: TorrentFile, settings: TorrentSettings) {
     self.torrent = torrent
@@ -697,17 +704,27 @@ public actor TorrentSession {
         // peer before it can serve anything.
         if paused {
           requestAges.removeAll()
-        } else if let stale = requestAges.first(where: {
-          Date().timeIntervalSince($0.value) > Self.blockStallTimeout
-        }) {
-          // A requested block that hasn't arrived in a long time: the peer
-          // may be alive but silently withholding it (the read idle timeout
-          // never fires because the peer keeps sending other blocks). Drop
-          // the peer so its whole pipeline is freed for re-request.
-          Self.log.info(
-            "\(label, privacy: .public) block \(stale.key.piece):\(stale.key.begin) stalled past \(Self.blockStallTimeout, privacy: .public)s — dropping peer"
-          )
-          break
+        } else {
+          // Only blocks still in flight on this peer should age toward the
+          // stall timeout. Once a block arrives (or is freed), its request
+          // age is stale — a received block must NOT trip the drop check 60s
+          // later, or every healthy peer is force-disconnected ~60s after its
+          // first request and the swarm churns (reconnect → serve → drop),
+          // starving the frontier piece. Prune ages for blocks no longer
+          // pending before checking for a genuine stall.
+          requestAges = requestAges.filter { picker.pending[key, default: []].contains($0.key) }
+          if let stale = requestAges.first(where: {
+            Date().timeIntervalSince($0.value) > Self.blockStallTimeout
+          }) {
+            // A requested block that hasn't arrived in a long time: the peer
+            // may be alive but silently withholding it (the read idle timeout
+            // never fires because the peer keeps sending other blocks). Drop
+            // the peer so its whole pipeline is freed for re-request.
+            Self.log.info(
+              "\(label, privacy: .public) block \(stale.key.piece):\(stale.key.begin) stalled past \(Self.blockStallTimeout, privacy: .public)s — dropping peer"
+            )
+            break
+          }
         }
         // Re-sync the rate tracker with what handlePiece recorded
         // (it lives on the actor; this loop's local copy goes stale).
@@ -749,7 +766,11 @@ public actor TorrentSession {
           choked = false
           Self.log.info("\(label, privacy: .public) unchoked")
         case .bitfield(let bits):
-          picker.setAvailable(piecesFromBitfield(bits), on: key)
+          let availability = piecesFromBitfield(bits)
+          picker.setAvailable(availability, on: key)
+          Self.log.info(
+            "\(label, privacy: .public) bitfield: \(availability.count, privacy: .public)/\(self.picker.pieceCount, privacy: .public) pieces, covers-frontier=\(availability.contains(self.picker.cursor), privacy: .public)"
+          )
           if !sentOurBitfield {
             try await connection.send(
               .bitfield(Data(repeating: 0, count: (picker.pieceCount + 7) / 8)))
@@ -831,9 +852,15 @@ public actor TorrentSession {
     let pieceSize = picker.pieceSize(of: index)
     let expectedLength = min(settings.blockSize, pieceSize - begin)
     guard begin < pieceSize, data.count == expectedLength else {
-      // Malformed block: drop it (the picker slot frees and the block
-      // gets re-requested).
-      picker.complete(PiecePicker.BlockKey(piece: index, begin: begin), on: key)
+      // Malformed/duplicate block: free the pipeline slot (complete does
+      // that), but DO NOT leave it marked received. It was never stored in
+      // pieceBuffers, so marking it received would make assembly bail on the
+      // missing bytes forever while request() never re-requests it (it is
+      // in the received set) — a permanent piece freeze, cured only by a
+      // relaunch. Release the received mark so the block is re-requestable.
+      let blockKey = PiecePicker.BlockKey(piece: index, begin: begin)
+      picker.complete(blockKey, on: key)
+      picker.releaseReceivedBlock(blockKey)
       return
     }
 
@@ -927,9 +954,8 @@ public actor TorrentSession {
     var adopted = 0
     for index in resume.verified.sorted() {
       guard index >= 0, index < picker.pieceCount, !verifiedPieces.contains(index) else { continue }
-      guard let data = try? await disk.read(piece: index),
-        data.count == picker.pieceSize(of: index),
-        Data(Insecure.SHA1.hash(data: data)) == torrent.pieceHashes[index]
+      guard let hash = try? await disk.hash(piece: index),
+        hash == torrent.pieceHashes[index]
       else {
         Self.log.info(
           "resume state claimed piece \(index, privacy: .public) verified but it does not hash — re-fetching"
@@ -1006,6 +1032,52 @@ public actor TorrentSession {
       stats.trackerSeeders = trackerSeeders
       stats.trackerLeechers = trackerLeechers
       emit(.stats(stats))
+
+      // Diagnostics: surface a frontier stall ("Debian doesn't download in
+      // a single run") as a readable line the user can hand back. A DIAG
+      // heartbeat every 5s shows the frontier + whether any connected peer
+      // has it; once progress stops for 30s+ the line is labelled
+      // NO-PROGRESS with how long. Any piece verifies → timer resets.
+      let verifiedCount = verifiedPieces.count
+      if verifiedCount != diagProgressLastCount {
+        diagProgressLastCount = verifiedCount
+        diagStallSince = nil
+        diagTicks = 0
+      } else if state == .downloading {
+        if diagStallSince == nil { diagStallSince = Date() }
+        diagTicks += 1
+        if diagTicks >= 5 {
+          diagTicks = 0
+          let stalledFor = diagStallSince.map { Int(-$0.timeIntervalSinceNow) } ?? 0
+          logDiagnostics(
+            reason: stalledFor >= 30
+              ? "NO-PROGRESS \(stalledFor)s before this line" : nil)
+        }
+      }
+    }
+  }
+
+  /// Emit one high-signal diagnostics line: the sequential frontier, whether
+  /// any connected peer actually has it, the peer/seed counts, and speed.
+  /// The frontier-has-peer flag is what tells discovery starvation (false)
+  /// apart from a fetch/handshake problem (true but no progress).
+  private func logDiagnostics(reason: String?) {
+    let verifiedCount = verifiedPieces.count
+    let total = picker.pieceCount
+    let cursor = picker.cursor
+    let cursorHasPeer = picker.peerHas.values.contains { $0.contains(cursor) }
+    let connected = peers.count
+    let seeders = picker.peerHas.values.filter { $0.count >= picker.pieceCount }.count
+    let pct = total > 0 ? String(format: "%.1f", Double(verifiedCount) / Double(total) * 100) : "0"
+    let speedKBs = stats.downloadSpeed / 1024
+    if let reason {
+      Self.log.info(
+        "DIAG [\(reason, privacy: .public)] verified=\(verifiedCount, privacy: .public)/\(total, privacy: .public) (\(pct, privacy: .public)%) frontier=\(cursor, privacy: .public) peer-has-frontier=\(cursorHasPeer, privacy: .public) peers=\(connected, privacy: .public) seeders=\(seeders, privacy: .public) speedKBs=\((speedKBs), privacy: .public)"
+      )
+    } else {
+      Self.log.info(
+        "DIAG verified=\(verifiedCount, privacy: .public)/\(total, privacy: .public) (\(pct, privacy: .public)%) frontier=\(cursor, privacy: .public) peer-has-frontier=\(cursorHasPeer, privacy: .public) peers=\(connected, privacy: .public) seeders=\(seeders, privacy: .public) speedKBs=\((speedKBs), privacy: .public)"
+      )
     }
   }
 

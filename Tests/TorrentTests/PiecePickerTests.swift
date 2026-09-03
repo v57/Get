@@ -306,6 +306,30 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
       == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
 }
 
+// MARK: - Released-block tracking (malformed block must not freeze a piece)
+
+@Test func releaseReceivedBlockMakesBlockReRequestable() {
+  var picker = makePicker(pieceCount: 1, pieceLength: 16 * 1024 * 2)  // 1 piece, 2 blocks
+  picker.setAllAvailable(on: peerA)
+
+  // Request block 0 — it is now pending.
+  _ = picker.request(for: peerA, pipeline: 4)
+  let key = PiecePicker.BlockKey(piece: 0, begin: 0)
+
+  // A malformed block arrived: complete() frees the slot but ALSO marks the
+  // block "received". Release that mark — the block was never stored in
+  // pieceBuffers, so treating it as received would freeze the piece forever.
+  picker.complete(key, on: peerA)
+  #expect(picker.received[0] == Set([key]))
+  picker.releaseReceivedBlock(key)
+  #expect(picker.received[0] == nil)
+
+  // The block is requestable again — the piece can still be assembled.
+  #expect(
+    picker.request(for: peerA, pipeline: 4)
+      == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+}
+
 // MARK: - Availability
 
 @Test func setAllAvailableMakesEveryPieceRequestable() {

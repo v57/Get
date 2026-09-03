@@ -145,6 +145,21 @@ public struct PiecePicker: Sendable {
   /// disconnect) so its blocks are re-requestable.
   public mutating func resetReceived(_ piece: Int) { received[piece] = nil }
 
+  /// Drop the received mark for ONE block so it becomes re-requestable.
+  ///
+  /// `complete(_:on:)` is the only way to free a pipeline slot, but it also
+  /// marks the block "received". A malformed block (wrong length, never
+  /// stored into the piece buffer) must free its slot WITHOUT being treated
+  /// as received — otherwise assembly bails on the missing bytes forever
+  /// while `request` never re-requests the block (it is in the received
+  /// set), permanently freezing the piece until a relaunch clears memory.
+  /// Call `complete` to free the slot, then `releaseReceivedBlock` to undo
+  /// the received mark.
+  public mutating func releaseReceivedBlock(_ key: BlockKey) {
+    received[key.piece]?.remove(key)
+    if received[key.piece]?.isEmpty == true { received[key.piece] = nil }
+  }
+
   /// A peer went away: free its in-flight blocks so others can fetch them,
   /// and drop its (now stale) availability.
   public mutating func disconnect(_ peer: PeerID) {

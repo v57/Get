@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Errors thrown by `DiskWriter`.
@@ -104,6 +105,48 @@ public actor DiskWriter {
       out.append(chunk)
     }
     return out
+  }
+
+  /// Stream one piece's bytes through SHA-1 and return the 20-byte digest,
+  /// WITHOUT ever building the whole piece as a `Data`.
+  ///
+  /// The resume-on-launch re-verify used to call `read(piece:)` in a loop,
+  /// allocating a full piece-sized `Data` per piece. On a large download the
+  /// transient heap blew up to tens of GB (the "loads 19 GB on launch" leak —
+  /// the bytes were held and only released once the whole scan finished).
+  /// Streaming the hash keeps the scan's memory O(chunk size) regardless of
+  /// how many pieces are claimed.
+  public func hash(piece index: Int) throws -> Data {
+    precondition(index >= 0, "piece index must be non-negative")
+    let pieceStart = Int64(index) * Int64(pieceLength)
+    guard pieceStart < totalSize else { throw DiskWriterError.pieceIndexOutOfRange(index: index) }
+    let pieceEnd = pieceStart + min(Int64(pieceLength), totalSize - pieceStart)
+    let spans = layout.spans(forPieceRange: pieceStart..<pieceEnd)
+    var hasher = Insecure.SHA1()
+    let chunkSize = 256 * 1024
+    // One fixed-size Data reused for every read — no per-chunk allocation.
+    // (FileHandle.read would malloc+free a fresh Data on each chunk, churning
+    // through the whole resume scan.) A Data slice shares that same storage,
+    // so feeding the hasher `buffer[0..<n]` is also zero-copy.
+    var buffer = Data(count: chunkSize)
+    for span in spans {
+      let handle = try fileHandle(for: span.file)
+      handle.seek(toFileOffset: UInt64(span.offset))
+      let fd = handle.fileDescriptor
+      var remaining = span.length
+      while remaining > 0 {
+        let n = min(remaining, chunkSize)
+        let count = buffer.withUnsafeMutableBytes { p -> Int in
+          Darwin.read(fd, p.baseAddress, n)
+        }
+        guard count > 0 else {
+          throw DiskWriterError.io("read failed for \(entryURL(span.file)) at \(span.offset)")
+        }
+        hasher.update(data: buffer[0..<count])
+        remaining -= count
+      }
+    }
+    return Data(hasher.finalize())
   }
 
   /// Flush and close every cached file handle.

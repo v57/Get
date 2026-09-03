@@ -225,6 +225,10 @@ public actor TorrentSession {
   private var diagProgressLastCount = -1
   private var diagStallSince: Date?
   private var diagTicks = 0
+  /// False until this session has connected to the swarm (announced + started
+  /// discovery loops). A download restored already-paused skips the swarm at
+  /// start() and stays false until resume() connects it.
+  private var swarmConnected = false
 
   public init(torrent: TorrentFile, settings: TorrentSettings) {
     self.torrent = torrent
@@ -291,7 +295,7 @@ public actor TorrentSession {
     // data files already exist in the save directory, and prepare() would
     // create them from scratch. Claimed-verified pieces are re-verified
     // against the disk before being trusted.
-    await applyResumeState()
+    await applyResumeState(reverify: !initiallyPaused)
 
     if verifiedPieces.count == picker.pieceCount {
       // Every piece already verified in a previous session: go straight
@@ -301,22 +305,33 @@ public actor TorrentSession {
     }
 
     try await disk.prepare()
-    // A session restored already-paused brings the engine up (resume state
-    // loaded, disk prepared, listener bound, one announce) but stays idle:
-    // the peer spawn + discovery loops guard on `state == .downloading`, and
-    // resume() flips the flag and re-spawns the pool.
     if initiallyPaused {
+      // A download restored already-paused brings the engine up (resume state
+      // loaded, files prepared) but stays idle: it must NOT re-hash the disk
+      // for verified pieces, announce to trackers, bootstrap DHT, bind the
+      // inbound listener, or spawn peers. The swarm is only connected from
+      // resume(), which is what a paused download is waiting for.
       paused = true
       state = .paused
-    } else {
-      state = .downloading
+      emit(.state(state))
+      startStatsLoop()
+      return
     }
+    state = .downloading
     emit(.state(state))
     startStatsLoop()
 
-    // Bind the inbound listener BEFORE announcing so the advertised port
-    // is the one actually listening. The acceptor is created here (its
-    // closure captures self, which is unsafe during init).
+    await connectToSwarm()
+  }
+
+  /// Bind the inbound listener (if enabled), announce to the trackers, and
+  /// start the DHT + tracker discovery loops. Called from a running start()
+  /// and from resume() when a download was restored already-paused (which
+  /// never connected at launch).
+  private func connectToSwarm() async {
+    // Bind the inbound listener BEFORE announcing so the advertised port is
+    // the one actually listening. The acceptor is created here (its closure
+    // captures self, which is unsafe during init).
     if settings.useInbound, acceptor == nil {
       acceptor = PeerAcceptor(
         infoHash: torrent.infoHash, peerID: ourPeerID, encryptedOnly: settings.encryptedPeersOnly,
@@ -336,16 +351,14 @@ public actor TorrentSession {
     Self.log.info("announce returned \(peers.count, privacy: .public) peer(s)")
     spawnPeerTasks(for: peers)
 
-    // DHT peer discovery (when enabled): bootstrap, then iteratively
-    // query for peers on a timer — the swarm changes, and each pass
-    // samples new nodes/peers.
-    if let dht {
+    // DHT peer discovery (when enabled): bootstrap, then iteratively query
+    // for peers on a timer — the swarm changes, and each pass samples new
+    // nodes/peers.
+    if let dht, dhtTask == nil {
       dhtTask = Task {
         await dht.bootstrap()
         while !Task.isCancelled {
-          // No discovery while paused/completed — peer spawn is download-only,
-          // and a paused download shouldn't burn DHT queries for peers it
-          // won't fetch. Poll periodically so a state change is picked up.
+          // No discovery while paused/completed — peer spawn is download-only.
           guard state == .downloading else {
             try? await Task.sleep(for: .seconds(5))
             continue
@@ -362,9 +375,10 @@ public actor TorrentSession {
       }
     }
 
-    if let interval = lastAnnounceInterval {
+    if trackerTask == nil, let interval = lastAnnounceInterval {
       trackerTask = Task { await self.trackerLoop(interval: interval) }
     }
+    swarmConnected = true
   }
 
   public func pause() async {
@@ -389,6 +403,13 @@ public actor TorrentSession {
       }
       picker.clearPending(on: key)
     }
+    // A paused download must not keep connections to the swarm: close the
+    // peers (queued blocks are dropped, in-flight ones are re-requested on
+    // resume). The tracker/DHT loops already idle on state == .paused.
+    for (_, task) in peerTasks { task.cancel() }
+    peerTasks.removeAll()
+    for (_, connection) in peers { await connection.close() }
+    peers.removeAll()
     saveResumeState()
   }
 
@@ -397,11 +418,16 @@ public actor TorrentSession {
     paused = false
     state = .downloading
     emit(.state(.downloading))
-    // A paused session held its peer pool back (spawnPeerTasks only runs
-    // while downloading). Re-put the tracked pool on the wire so the
-    // download resumes promptly rather than waiting for the next 60s/90s
-    // discovery tick. Peers still connected are skipped (already spawned).
-    spawnPeerTasks(for: announcedPeers)
+    if !swarmConnected {
+      // Restored already-paused: it never announced or connected at launch,
+      // so bring the swarm up now (announce + discovery loops + peers).
+      await connectToSwarm()
+    } else {
+      // Paused mid-download: pause() closed the peers; re-spawn the tracked
+      // pool so it reconnects promptly rather than waiting for the next
+      // discovery tick.
+      spawnPeerTasks(for: announcedPeers)
+    }
   }
 
   public func cancel() async {
@@ -945,7 +971,7 @@ public actor TorrentSession {
   /// length or total size) or when the data files aren't present in the
   /// save directory. Best effort — a missing, corrupt, or unusable state
   /// simply means the download starts from scratch.
-  private func applyResumeState() async {
+  private func applyResumeState(reverify: Bool = true) async {
     guard resumeDataFilesPresent else { return }
     guard let resume = ResumeState.load(infoHash: torrent.infoHash) else { return }
     guard resume.pieceLength == torrent.pieceLength, resume.totalSize == torrent.totalSize else {
@@ -954,13 +980,14 @@ public actor TorrentSession {
     var adopted = 0
     for index in resume.verified.sorted() {
       guard index >= 0, index < picker.pieceCount, !verifiedPieces.contains(index) else { continue }
-      guard let hash = try? await disk.hash(piece: index),
-        hash == torrent.pieceHashes[index]
-      else {
-        Self.log.info(
-          "resume state claimed piece \(index, privacy: .public) verified but it does not hash — re-fetching"
-        )
-        continue
+      if reverify {
+        guard let hash = try? await disk.hash(piece: index), hash == torrent.pieceHashes[index]
+        else {
+          Self.log.info(
+            "resume state claimed piece \(index, privacy: .public) verified but it does not hash — re-fetching"
+          )
+          continue
+        }
       }
       verifiedPieces.insert(index)
       stats.verifiedBytes += Int64(picker.pieceSize(of: index))

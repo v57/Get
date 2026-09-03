@@ -1096,7 +1096,7 @@ public actor TorrentSession {
     let connected = peers.count
     let seeders = picker.peerHas.values.filter { $0.count >= picker.pieceCount }.count
     let pct = total > 0 ? String(format: "%.1f", Double(verifiedCount) / Double(total) * 100) : "0"
-    let speedKBs = stats.downloadSpeed / 1024
+    let speedKBs = Int(stats.downloadSpeed / 1024)
     if let reason {
       Self.log.info(
         "DIAG [\(reason, privacy: .public)] verified=\(verifiedCount, privacy: .public)/\(total, privacy: .public) (\(pct, privacy: .public)%) frontier=\(cursor, privacy: .public) peer-has-frontier=\(cursorHasPeer, privacy: .public) peers=\(connected, privacy: .public) seeders=\(seeders, privacy: .public) speedKBs=\((speedKBs), privacy: .public)"

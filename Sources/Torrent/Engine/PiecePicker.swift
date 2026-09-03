@@ -49,6 +49,13 @@ public struct PiecePicker: Sendable {
   /// Cleared when the piece verifies (cursor advances) or fails (re-fetch).
   public private(set) var received: [Int: Set<BlockKey>] = [:]
 
+  /// Pieces that have fully verified (SHA-1 matched and written). The picker
+  /// must skip these when scanning — a piece can verify out of fetch order
+  /// when a peer lacks the frontier but has later pieces. The frontier is
+  /// always the lowest non-completed piece in fetch order, so the strict gate
+  /// gates on the real next-needed piece, never past a gap.
+  public private(set) var completed: Set<Int> = []
+
   public struct BlockKey: Hashable, Sendable {
     public let piece: Int
     public let begin: Int
@@ -86,6 +93,7 @@ public struct PiecePicker: Sendable {
     else { return }
     order = newOrder
     cursorPos = 0
+    completed = []
   }
 
   /// Replace the peer's announced availability with `pieces`.
@@ -111,6 +119,7 @@ public struct PiecePicker: Sendable {
     var pos = cursorPos
     while pos < order.count {
       let piece = order[pos]
+      if completed.contains(piece) { pos += 1; continue }
       if peerHas[peer]?.contains(piece) == true {
         let blocks = blockCount(of: piece)
         var inflight = Set<BlockKey>()
@@ -179,9 +188,15 @@ public struct PiecePicker: Sendable {
   /// backwards), and its received-block bookkeeping is dropped (the piece
   /// is done). Pieces not in the fetch order are ignored.
   public mutating func advancePast(_ piece: Int) {
-    guard let pos = order.firstIndex(of: piece) else { return }
-    cursorPos = max(cursorPos, pos + 1)
+    completed.insert(piece)
     received[piece] = nil
+    // The frontier is the lowest non-completed piece in fetch order. NEVER
+    // jump past an unverified one: a piece that verified ahead of the cursor
+    // is a skip-over, and must not strand the pieces still in front of it
+    // (that deadlocks the strict gate once the fetch order exhausts).
+    while cursorPos < order.count, completed.contains(order[cursorPos]) {
+      cursorPos += 1
+    }
   }
 
   /// Number of blocks in `piece`.

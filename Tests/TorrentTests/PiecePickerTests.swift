@@ -42,7 +42,9 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
 
 @Test func stallsWhenCursorPieceAvailableOnNoPeer() {
   var picker = makePicker()
-  picker.advancePast(2)  // cursor == 3
+  picker.advancePast(0)
+  picker.advancePast(1)
+  picker.advancePast(2)  // frontier == 3
   picker.setAvailable(Set(4..<10), on: peerA)  // nobody has piece 3
   picker.setAvailable(Set(5..<10), on: peerB)
 
@@ -159,6 +161,8 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
 @Test func advancePastMovesCursor() {
   var picker = makePicker()
   #expect(picker.cursor == 0)
+  picker.advancePast(0)
+  picker.advancePast(1)
   picker.advancePast(2)
   #expect(picker.cursor == 3)
 
@@ -200,9 +204,9 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
   picker.setOrder([4, 5, 6, 7, 0, 1, 2, 3])
   picker.setAllAvailable(on: peerA)
 
-  // After verifying piece 7 (position 3), the frontier is piece 0 — the
-  // next piece in fetch order — not piece 8.
-  picker.advancePast(7)
+  // Verify pieces in fetch order (4,5,6,7 — the front of the order), so the
+  // frontier advances to 0 — the next piece in fetch order — not piece 8.
+  for p in [4, 5, 6, 7] { picker.advancePast(p) }
   #expect(picker.cursor == 0)
   #expect(
     picker.request(for: peerA, pipeline: 4)
@@ -328,6 +332,32 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
   #expect(
     picker.request(for: peerA, pipeline: 4)
       == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+}
+
+// MARK: - Out-of-order verification (ahead-fetch must not strand pieces)
+
+@Test func advancePastDoesNotSkipUnverifiedFrontier() {
+  // Reproduces the 94% download deadlock: the strict gate lets a peer that
+  // lacks the frontier fetch later pieces, so pieces verify out of order.
+  // Advancing a later piece must NOT jump the frontier past the still-needed
+  // earlier pieces — otherwise the fetch order exhausts (cursor == pieceCount)
+  // and the strict gate returns nil for everyone, stranding the leftovers.
+  var picker = makePicker(pieceCount: 6)
+  picker.setAllAvailable(on: peerA)
+
+  // Pieces 1...5 verify ahead of the frontier (piece 0).
+  for p in 1..<6 { picker.advancePast(p) }
+  #expect(picker.cursor == 0, "frontier stays at the lowest unverified piece")
+  #expect(picker.completed == Set(1..<6))
+
+  // The frontier is still requestable (previously the order was exhausted).
+  #expect(
+    picker.request(for: peerA, pipeline: 4)
+      == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
+
+  // Once the gap fills, the frontier skips over the already-completed pieces.
+  picker.advancePast(0)
+  #expect(picker.cursor == 6, "frontier exhausts only after every piece done")
 }
 
 // MARK: - Availability

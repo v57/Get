@@ -215,6 +215,18 @@ public struct PiecePicker: Sendable {
     pending[peer] = nil
   }
 
+  /// Drop the in-flight blocks belonging to `pieces` on `peer`, keeping every
+  /// other block. Used when a file is removed so its in-flight blocks are
+  /// cancelled (and can be re-requested if the file is restored). Returns the
+  /// dropped blocks so the caller can send `.cancel` for each.
+  public mutating func dropPending(forPieces pieces: Set<Int>, on peer: PeerID) -> [BlockKey] {
+    guard var set = pending[peer] else { return [] }
+    let dropped = set.filter { pieces.contains($0.piece) }
+    set.subtract(dropped)
+    pending[peer] = set.isEmpty ? nil : set
+    return Array(dropped)
+  }
+
   /// A piece was verified: the cursor moves past it in fetch order (never
   /// backwards), and its received-block bookkeeping is dropped (the piece
   /// is done). Pieces not in the fetch order are ignored.
@@ -227,6 +239,24 @@ public struct PiecePicker: Sendable {
     // (that deadlocks the strict gate once the fetch order exhausts).
     while cursorPos < order.count, completed.contains(order[cursorPos]) {
       cursorPos += 1
+    }
+  }
+
+  /// Undo a verified piece: drop it from the completed set and its received
+  /// bookkeeping, and rewind the frontier to the lowest non-completed piece
+  /// in fetch order so it is fetched again.
+  ///
+  /// Used when a piece's file is removed (its data is deleted) or restored, so
+  /// the piece is re-downloaded rather than trusted from a now-absent file.
+  public mutating func unverify(_ piece: Int) {
+    completed.remove(piece)
+    received[piece] = nil
+    // The frontier is the lowest non-completed piece in fetch order — un-
+    // completing a piece below the cursor rewinds it so that piece is fetched.
+    if let first = order.firstIndex(where: { !completed.contains($0) }) {
+      cursorPos = first
+    } else {
+      cursorPos = order.count
     }
   }
 

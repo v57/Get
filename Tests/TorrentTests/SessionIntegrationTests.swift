@@ -599,3 +599,97 @@ private func waitForState(
   let savedData = try Data(contentsOf: saved)
   #expect(savedData == content)
 }
+
+/// A removed file quit the download: it is not created on disk, its pieces are
+/// never requested, and the download completes without it (all non-removed
+/// files done). Removing before start() is deterministic — no race with an
+/// in-flight write — and exercises the prepare-must-not-resurrect path.
+@Test func testRemovedFileCompletesDownloadWithoutIt() async throws {
+  let fileA = makeContent(48 * 1024)  // pieces 0-2
+  let fileB = makeContent(48 * 1024)  // pieces 3-5
+  let content = fileA + fileB
+  let files: [(path: [String], data: Data)] = [(["a.bin"], fileA), (["b.bin"], fileB)]
+  let seeder = try FakeSeeder(
+    content: content, pieceLength: 16 * 1024, infoHash: [UInt8](repeating: 0xAB, count: 20),
+    peerID: Array("-FAKE_SEEDER-0000000".utf8), serveDelay: .milliseconds(3))
+  defer { seeder.stop() }
+  let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+  let bundle = try SyntheticTorrent.make(
+    data: Data(), pieceLength: 16 * 1024, name: "rem", files: files,
+    announce: tracker.url.absoluteString)
+  seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+  let dir = try makeTempDir("rem")
+  defer { removeTempDir(dir) }
+  var settings = TorrentSettings()
+  settings.saveDirectory = dir
+
+  let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+  let events = await session.events
+  // Remove b.bin (file index 1) BEFORE the download starts: its file must not
+  // be resurrected by prepare() and its pieces must never leave the order.
+  await session.setFileRemoved(true, fileIndex: 1)
+  try await session.start()
+
+  let completed = await waitForState(.completed, in: events, timeout: .seconds(15))
+  #expect(completed, "download did not complete with the file removed")
+
+  // a.bin is present and byte-identical; b.bin was never created.
+  #expect(try Data(contentsOf: dir.appendingPathComponent("rem/a.bin")) == fileA)
+  #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("rem/b.bin").path))
+
+  // The seeder never saw a request for the removed file's pieces.
+  let requested = try await seeder.waitForResult(timeout: .seconds(5)).receivedMessages.compactMap {
+    message -> Int? in
+    if case .request(let index, _, _) = message { return index }
+    return nil
+  }
+  #expect(!requested.contains(3) && !requested.contains(4) && !requested.contains(5))
+  #expect(requested.sorted() == [0, 1, 2])
+}
+
+/// A removed file can be restored ("unpaused") to continue downloading: after
+/// remove → restore its pieces re-enter the fetch order and both files land.
+/// Done before start() so it is deterministic — no race with completion.
+@Test func testRestoredFileDownloadsAfterRemoval() async throws {
+  let fileA = makeContent(48 * 1024)  // pieces 0-2
+  let fileB = makeContent(48 * 1024)  // pieces 3-5
+  let content = fileA + fileB
+  let files: [(path: [String], data: Data)] = [(["a.bin"], fileA), (["b.bin"], fileB)]
+  let seeder = try FakeSeeder(
+    content: content, pieceLength: 16 * 1024, infoHash: [UInt8](repeating: 0xAB, count: 20),
+    peerID: Array("-FAKE_SEEDER-0000000".utf8), serveDelay: .milliseconds(3))
+  defer { seeder.stop() }
+  let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+  let bundle = try SyntheticTorrent.make(
+    data: Data(), pieceLength: 16 * 1024, name: "rest", files: files,
+    announce: tracker.url.absoluteString)
+  seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+  let dir = try makeTempDir("rest")
+  defer { removeTempDir(dir) }
+  var settings = TorrentSettings()
+  settings.saveDirectory = dir
+
+  let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+  let events = await session.events
+  // Remove b.bin, then restore it — both before start, so no race.
+  await session.setFileRemoved(true, fileIndex: 1)
+  await session.setFileRemoved(false, fileIndex: 1)
+  try await session.start()
+
+  let completed = await waitForState(.completed, in: events, timeout: .seconds(15))
+  #expect(completed, "download did not complete after restoring the file")
+
+  // Both files are present and byte-identical — b.bin was re-downloaded.
+  #expect(try Data(contentsOf: dir.appendingPathComponent("rest/a.bin")) == fileA)
+  #expect(try Data(contentsOf: dir.appendingPathComponent("rest/b.bin")) == fileB)
+
+  // Every piece of both files was requested.
+  let requested = try await seeder.waitForResult(timeout: .seconds(5)).receivedMessages.compactMap {
+    message -> Int? in
+    if case .request(let index, _, _) = message { return index }
+    return nil
+  }
+  #expect(requested.sorted() == [0, 1, 2, 3, 4, 5])
+}

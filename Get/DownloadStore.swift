@@ -28,6 +28,10 @@ import os
     var priority: Int = 0
     /// True while this file's pieces are not being fetched.
     var isPaused: Bool = false
+    /// True once the file has been trashed (removed) from the download. Its
+    /// on-disk data is deleted and its pieces are excluded from fetching; the
+    /// download counts as complete without it. Restoring re-downloads it.
+    var isRemoved: Bool = false
 
     var id: Int { index }
   }
@@ -303,6 +307,32 @@ import os
       items[index].files.indices.contains(fileIndex)
     else { return }
     setFilePaused(!items[index].files[fileIndex].isPaused, fileIndex: fileIndex, itemID: itemID)
+  }
+
+  /// Remove (trash) one file from the download: its pieces quit the fetch
+  /// order, its on-disk data is deleted, and it no longer counts toward
+  /// completion. The file is shown struck-through and can be restored.
+  func removeFile(fileIndex: Int, itemID: String) {
+    guard let index = items.firstIndex(where: { $0.id == itemID }),
+      items[index].files.indices.contains(fileIndex)
+    else { return }
+    items[index].files[fileIndex].isRemoved = true
+    // A removed file is not "paused" — it is gone from the fetch entirely.
+    items[index].files[fileIndex].isPaused = false
+    items[index].files[fileIndex].verifiedBytes = 0
+    Task { await sessions[itemID]?.setFileRemoved(true, fileIndex: fileIndex) }
+  }
+
+  /// Restore a previously removed file: re-include it in the download and
+  /// re-download its data from scratch (it was deleted while removed).
+  func restoreFile(fileIndex: Int, itemID: String) {
+    guard let index = items.firstIndex(where: { $0.id == itemID }),
+      items[index].files.indices.contains(fileIndex)
+    else { return }
+    items[index].files[fileIndex].isRemoved = false
+    items[index].files[fileIndex].isPaused = false
+    Task { await sessions[itemID]?.setFilePaused(false, fileIndex: fileIndex) }
+    Task { await sessions[itemID]?.setFileRemoved(false, fileIndex: fileIndex) }
   }
 
   // MARK: - Persistence (resume on relaunch)

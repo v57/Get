@@ -148,9 +148,12 @@ private struct TorrentDetailView: View {
     List {
       Section {
         ForEach(item.files) { file in
-          FileRow(file: file, priorityMode: priorityMode) {
-            store.toggleFilePaused(fileIndex: file.index, itemID: itemID)
-          }.contentShape(Rectangle()).onTapGesture {
+          FileRow(
+            file: file, priorityMode: priorityMode,
+            onTogglePause: { store.toggleFilePaused(fileIndex: file.index, itemID: itemID) },
+            onRemove: { store.removeFile(fileIndex: file.index, itemID: itemID) },
+            onRestore: { store.restoreFile(fileIndex: file.index, itemID: itemID) }
+          ).contentShape(Rectangle()).onTapGesture {
             guard priorityMode else { return }
             togglePriority(for: file)
           }
@@ -221,37 +224,62 @@ private struct TorrentDetailView: View {
   }
 }
 
-/// One file row: name, size, per-file progress, priority badge, pause button.
+/// One file row: name, size, per-file progress, priority badge, pause button,
+/// and (when paused) a trash button to remove the file, plus a restore action
+/// for removed files.
 private struct FileRow: View {
   let file: DownloadStore.DownloadFileItem
   let priorityMode: Bool
   let onTogglePause: () -> Void
+  let onRemove: () -> Void
+  let onRestore: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 3) {
       HStack(spacing: 6) {
-        Text(file.path).lineLimit(1).truncationMode(.middle)
+        // A removed file is shown struck-through so it is clear it no longer
+        // belongs to the download (and can be restored).
+        Text(file.path).strikethrough(file.isRemoved).lineLimit(1).truncationMode(.middle)
         Spacer()
         if file.priority > 0 {
           Text("P\(file.priority)").font(.caption.weight(.semibold)).padding(.horizontal, 5)
             .padding(.vertical, 1).background(Capsule().fill(Color.accentColor.opacity(0.15)))
             .foregroundStyle(.tint)
         }
-        if file.isPaused { Text("Paused").font(.caption).foregroundStyle(.secondary) }
-        Button(action: onTogglePause) {
-          Image(systemName: file.isPaused ? "play.circle" : "pause.circle")
-        }.buttonStyle(.borderless).help(file.isPaused ? "Resume file" : "Pause file")
+        if file.isRemoved {
+          Text("Removed").font(.caption).foregroundStyle(.secondary)
+        } else if file.isPaused {
+          Text("Paused").font(.caption).foregroundStyle(.secondary)
+        }
+        if file.isRemoved {
+          // A removed file can be "unpaused" to continue downloading.
+          Button(action: onRestore) {
+            Image(systemName: "play.circle")
+          }.buttonStyle(.borderless).help("Restore file to download")
+        } else if file.isPaused {
+          Button(action: onTogglePause) {
+            Image(systemName: "play.circle")
+          }.buttonStyle(.borderless).help("Resume file")
+          // Trash a paused file to remove it from the download.
+          Button(action: onRemove) {
+            Image(systemName: "trash")
+          }.buttonStyle(.borderless).foregroundStyle(.red).help("Remove file")
+        } else {
+          Button(action: onTogglePause) {
+            Image(systemName: "pause.circle")
+          }.buttonStyle(.borderless).help("Pause file")
+        }
         Text(Self.formatSize(file.length)).font(.caption).foregroundStyle(.secondary)
           .monospacedDigit()
       }
       DualProgressView(
         primary: file.sequentialBytes, secondary: file.verifiedBytes, total: file.length
-      ).opacity(file.isPaused ? 0.4 : 1)
+      ).opacity(file.isRemoved ? 0.2 : (file.isPaused ? 0.4 : 1))
       if priorityMode {
         Text(file.priority > 0 ? "Click to clear" : "Click to prioritize").font(.caption2)
           .foregroundStyle(.tertiary)
       }
-    }.padding(.vertical, 2).opacity(file.isPaused ? 0.75 : 1)
+    }.padding(.vertical, 2).opacity(file.isRemoved ? 0.5 : (file.isPaused ? 0.75 : 1))
   }
   struct DualProgressView: View {
     let primary: Int64

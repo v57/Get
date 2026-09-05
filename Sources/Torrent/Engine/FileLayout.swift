@@ -85,6 +85,15 @@ public struct FileLayout: Sendable {
     return baseDirectory.appendingPathComponent(first.path[0])
   }
 
+  /// True when this is a multi-file torrent (more than one disk entry).
+  ///
+  /// A single-file torrent always synthesizes exactly one entry, so
+  /// `entries.count > 1` reliably means multi-file. Multi-file downloads
+  /// skip upfront space reservation (DiskWriter.prepare creates empty
+  /// files and lets them grow as pieces land), while single-file torrents
+  /// preallocate to the exact torrent length.
+  public var isMultiFile: Bool { entries.count > 1 }
+
   /// Map a byte range of the torrent's content stream to disk segments.
   ///
   /// Returns one `(file, offset, length)` tuple per file the range touches,

@@ -61,12 +61,15 @@ private func makeTwoFileWriter(pieceLength: Int = 64) throws -> (DiskWriter, Fil
 
   try await writer.prepare()
 
-  // Subdirectory tree exists (b.txt can only exist under multi/sub/).
+  // The directory tree is created (b.txt can only live under multi/sub/),
+  // but multi-file downloads do NOT reserve space: every file is created
+  // empty and grows as pieces are written. Sizes are 0, not the torrent
+  // lengths.
   for (i, entry) in layout.entries.enumerated() {
     #expect(
       FileManager.default.fileExists(atPath: entry.url.path),
       "entry \(i) missing at \(entry.url.path)")
-    #expect(try fileSize(entry.url) == Int64(files[i].data.count))
+    #expect(try fileSize(entry.url) == 0, "multi-file prepare must not preallocate")
   }
 }
 

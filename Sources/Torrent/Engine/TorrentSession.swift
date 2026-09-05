@@ -199,6 +199,10 @@ public actor TorrentSession {
   private var filePriorities: [Int: Int] = [:]
   /// Files whose pieces must not be fetched (until resumed).
   private var pausedFiles: Set<Int> = []
+  /// Files the user removed from the download: their pieces are excluded from
+  /// the fetch order, their on-disk data is deleted, and they do not count
+  /// toward completion. Restoring a file re-includes it and re-downloads it.
+  private var removedFiles: Set<Int> = []
 
   private var state: TorrentState = .stopped
   private var paused = false
@@ -276,7 +280,8 @@ public actor TorrentSession {
     // ascending; priorities reorder it.
     self.picker.setOrder(
       Self.priorityOrder(
-        pieceCount: pieceCount, verified: [], priorities: [:], pieceFile: pieceFile, pausedFiles: []
+        pieceCount: pieceCount, verified: [], priorities: [:], pieceFile: pieceFile,
+        pausedFiles: [], removedFiles: []
       ))
   }
 
@@ -500,28 +505,160 @@ public actor TorrentSession {
     picker.setOrder(
       Self.priorityOrder(
         pieceCount: picker.pieceCount, verified: verifiedPieces, priorities: filePriorities,
-        pieceFile: pieceFile, pausedFiles: pausedFiles))
+        pieceFile: pieceFile, pausedFiles: pausedFiles, removedFiles: removedFiles))
   }
 
   /// Compute the fetch order: unverified pieces sorted by (file priority,
   /// piece index), unprioritized files (rank 5) after all prioritized ones,
-  /// paused files excluded. Pure — usable from `init` before the actor is
-  /// fully initialized.
+  /// pieces of paused files and removed files excluded. Pure — usable from
+  /// `init` before the actor is fully initialized.
   private static func priorityOrder(
     pieceCount: Int, verified: Set<Int>, priorities: [Int: Int], pieceFile: [Int],
-    pausedFiles: Set<Int>
+    pausedFiles: Set<Int>, removedFiles: Set<Int>
   ) -> [Int] {
     func rank(of piece: Int) -> Int {
       let file = pieceFile[piece]
       return priorities[file] ?? 0 > 0 ? priorities[file]! : 5
     }
     let unverified = (0..<pieceCount).filter { !verified.contains($0) }
-    return unverified.filter { !pausedFiles.contains(pieceFile[$0]) }.sorted { a, b in
+    return unverified.filter {
+      !pausedFiles.contains(pieceFile[$0]) && !removedFiles.contains(pieceFile[$0])
+    }.sorted { a, b in
       let ra = rank(of: a)
       let rb = rank(of: b)
       if ra != rb { return ra < rb }
       return a < b
     }
+  }
+
+  // MARK: - File removal
+
+  /// Remove (`true`) or restore (`false`) one file in a running or paused
+  /// download. Removing a file deletes its on-disk data, cancels its in-flight
+  /// requests, and excludes its pieces from the fetch order — it no longer
+  /// counts toward completion. Restoring re-includes the pieces and re-downloads
+  /// the file from scratch (its data was deleted while removed).
+  public func setFileRemoved(_ removed: Bool, fileIndex: Int) async {
+    guard fileIndex >= 0, fileIndex < layout.entries.count else { return }
+    if removed {
+      await removeFile(fileIndex)
+    } else {
+      await restoreFile(fileIndex)
+    }
+  }
+
+  /// Remove a file: un-verify the pieces it owns (their data is about to be
+  /// deleted), cancel their in-flight requests, exclude them from the order,
+  /// and delete the file's bytes on disk.
+  private func removeFile(_ fileIndex: Int) async {
+    guard !removedFiles.contains(fileIndex) else { return }
+    let ownedPieces = Set((0..<picker.pieceCount).filter { pieceFile[$0] == fileIndex })
+    for piece in ownedPieces { unverify(piece) }
+    removedFiles.insert(fileIndex)
+    rebuildOrder()
+    // Cancel in-flight blocks for the removed file's pieces so peers don't keep
+    // serving them (handlePiece also drops them if one still arrives).
+    let peersSnapshot = peers
+    for (key, connection) in peersSnapshot {
+      let dropped = picker.dropPending(forPieces: ownedPieces, on: key)
+      for block in dropped {
+        let length = min(settings.blockSize, picker.pieceSize(of: block.piece) - block.begin)
+        try? await connection.send(.cancel(index: block.piece, begin: block.begin, length: length))
+      }
+    }
+    await disk.setRemovedFiles(removedFiles)
+    await disk.deleteFileData(fileIndex)
+    refreshStats()
+    emit(.stats(stats))
+  }
+
+  /// Restore a removed file: its data was deleted while removed, so every piece
+  /// touching it (owned or straddling a neighbor) must re-download its bytes.
+  private func restoreFile(_ fileIndex: Int) async {
+    guard removedFiles.contains(fileIndex) else { return }
+    let touching = piecesTouchingFile(fileIndex)
+    for piece in touching { unverify(piece) }
+    removedFiles.remove(fileIndex)
+    await disk.setRemovedFiles(removedFiles)
+    rebuildOrder()
+    refreshStats()
+    emit(.stats(stats))
+  }
+
+  /// Undo a verified piece (its file was removed/restored and its data is not
+  /// trusted): drop it from the verified set + picker completion so it fetches
+  /// again, and undo the byte accounting.
+  private func unverify(_ piece: Int) {
+    guard piece >= 0, piece < picker.pieceCount else { return }
+    if verifiedPieces.remove(piece) != nil {
+      stats.verifiedBytes -= Int64(picker.pieceSize(of: piece))
+    }
+    picker.unverify(piece)
+    pieceBuffers[piece] = nil
+    pieceAttempts[piece] = nil
+  }
+
+  /// The set of pieces whose byte range intersects `file` — the pieces that
+  /// must re-download when a removed file is restored.
+  private func piecesTouchingFile(_ file: Int) -> Set<Int> {
+    Self.piecesTouchingFile(
+      fileEnds: layout.fileEnds, pieceLength: torrent.pieceLength, totalSize: torrent.totalSize,
+      file: file)
+  }
+
+  /// Pure form of `piecesTouchingFile` — testable without a live session.
+  static func piecesTouchingFile(
+    fileEnds: [Int64], pieceLength: Int, totalSize: Int64, file: Int
+  ) -> Set<Int> {
+    guard file >= 0, file < fileEnds.count else { return [] }
+    let fileStart = file == 0 ? 0 : fileEnds[file - 1]
+    let fileEnd = fileEnds[file]
+    var pieces: Set<Int> = []
+    // A piece that starts just before the file may extend into it, so begin
+    // the scan one piece early.
+    var piece = max(0, Int(fileStart / Int64(pieceLength)) - 1)
+    let pieceCount = Int((totalSize + Int64(pieceLength) - 1) / Int64(pieceLength))
+    while piece < pieceCount, Int64(piece) * Int64(pieceLength) < fileEnd {
+      let pStart = Int64(piece) * Int64(pieceLength)
+      let pEnd = min(pStart + Int64(pieceLength), totalSize)
+      if pEnd > fileStart && pStart < fileEnd { pieces.insert(piece) }
+      piece += 1
+    }
+    return pieces
+  }
+
+  /// The download is complete when every piece NOT owned by a removed file is
+  /// verified. Paused files still count as required (they're just not being
+  /// fetched right now), so pausing a file never "completes" the download —
+  /// only removing one does.
+  private var isDownloadComplete: Bool {
+    for piece in 0..<picker.pieceCount where !removedFiles.contains(pieceFile[piece]) {
+      if !verifiedPieces.contains(piece) { return false }
+    }
+    return true
+  }
+
+  /// Download progress excluding removed files: verified bytes in non-removed
+  /// files over the total bytes of non-removed files, so a removed file does
+  /// not drag the bar down (or push it above 1).
+  private func effectiveProgress() -> Double {
+    let fileVerified = stats.fileVerifiedBytes
+    var verified: Int64 = 0
+    var total: Int64 = 0
+    for file in 0..<layout.entries.count where !removedFiles.contains(file) {
+      verified += fileVerified.indices.contains(file) ? fileVerified[file] : 0
+      total += layout.entries[file].length
+    }
+    return total > 0 ? Double(verified) / Double(total) : 1
+  }
+
+  /// Recompute the per-file and overall progress fields after the removed-file
+  /// set changes (remove or restore), so an immediate `.stats` emit reflects
+  /// the new state instead of the previous tick's stale numbers.
+  private func refreshStats() {
+    stats.fileVerifiedBytes = computeFileProgress()
+    stats.fileSequentialBytes = computeSequentialFileProgress()
+    stats.progress = effectiveProgress()
   }
 
   // MARK: - Trackers
@@ -905,6 +1042,15 @@ public actor TorrentSession {
     }
 
     let blockKey = PiecePicker.BlockKey(piece: index, begin: begin)
+    // A piece owned entirely by a removed file is dropped — the file was
+    // deleted, so never buffer/verify/write those bytes. (In-flight blocks may
+    // still arrive after the file was removed; freeing the peer's slot is
+    // enough. Pieces that straddle a removed file are owned by a kept file and
+    // still assemble/verify — DiskWriter.write skips the removed file's span.)
+    if removedFiles.contains(pieceFile[index]) {
+      picker.complete(blockKey, on: key)
+      return
+    }
     // ENDGAME / redundant fetch: the same block may be requested from more
     // than one peer. Only the FIRST arrival is stored and hashed; any later
     // duplicate (already buffered for this piece+begin) is idempotent — free
@@ -969,22 +1115,20 @@ public actor TorrentSession {
     // so an interrupted download can resume from here.
     if verifiedPieces.count % 16 == 0 { saveResumeState() }
 
-    if verifiedPieces.count == picker.pieceCount { await finishDownload() }
+    if isDownloadComplete { await finishDownload() }
   }
 
   // MARK: - Resume
 
-  /// The torrent's data files already exist in the save directory with
-  /// their exact torrent lengths — the precondition for trusting persisted
-  /// resume state. Must be evaluated before `disk.prepare()`, which would
-  /// create the files from scratch.
+  /// The torrent's data files already exist in the save directory — the
+  /// precondition for trusting persisted resume state. Multi-file downloads
+  /// don't preallocate, so a partial download's files are shorter than their
+  /// full length; requiring at least one file to be present (rather than every
+  /// file at its exact length) lets resume/re-verify work with partial files.
+  /// Re-verification re-hashes every claimed piece on disk, so a piece whose
+  /// bytes aren't actually present is dropped and re-fetched.
   private var resumeDataFilesPresent: Bool {
-    layout.entries.allSatisfy { entry in
-      guard let attrs = try? FileManager.default.attributesOfItem(atPath: entry.url.path) else {
-        return false
-      }
-      return (attrs[.size] as? NSNumber)?.int64Value == entry.length
-    }
+    layout.entries.contains { FileManager.default.fileExists(atPath: $0.url.path) }
   }
 
   /// Seed the verified-piece set and picker cursor from persisted resume
@@ -1076,10 +1220,9 @@ public actor TorrentSession {
       let delta = now - bytesAtLastTick
       bytesAtLastTick = now
       stats.downloadSpeed = Double(delta)
-      stats.progress =
-        stats.totalBytes > 0 ? Double(stats.verifiedBytes) / Double(stats.totalBytes) : 1
       stats.fileVerifiedBytes = computeFileProgress()
       stats.fileSequentialBytes = computeSequentialFileProgress()
+      stats.progress = effectiveProgress()
       // A connected peer is a seeder if its announced set is complete.
       stats.seedersConnected = picker.peerHas.values.filter { $0.count >= picker.pieceCount }.count
       stats.trackerSeeders = trackerSeeders

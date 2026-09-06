@@ -156,6 +156,20 @@ private struct TorrentDetailView: View {
           ).contentShape(Rectangle()).onTapGesture {
             guard priorityMode else { return }
             togglePriority(for: file)
+          }.contextMenu {
+            // Restrict the download to this file (or this file and every file
+            // after it): every other file that isn't fully downloaded is
+            // paused and trashed.
+            if item.files.count > 1 {
+              Menu("Download") {
+                Button("Only this") {
+                  store.downloadOnly(fileIndex: file.index, itemID: itemID)
+                }
+                Button("Only this and after") {
+                  store.downloadOnly(fileIndex: file.index, itemID: itemID, andAfter: true)
+                }
+              }
+            }
           }
         }
       }
@@ -275,6 +289,8 @@ private struct FileRow: View {
       DualProgressView(
         primary: file.sequentialBytes, secondary: file.verifiedBytes, total: file.length
       ).opacity(file.isRemoved ? 0.2 : (file.isPaused ? 0.4 : 1))
+      Text("\(Text(file.sequentialBytes, format: .byteCount(style: .file))) / \(Text(file.verifiedBytes, format: .byteCount(style: .file)))")
+        .font(.caption).foregroundStyle(.secondary)
       if priorityMode {
         Text(file.priority > 0 ? "Click to clear" : "Click to prioritize").font(.caption2)
           .foregroundStyle(.tertiary)

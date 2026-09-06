@@ -159,8 +159,23 @@ import os
 
     let session = TorrentSession(torrent: torrent, settings: settings)
     sessions[id] = session
-    let files = torrent.files.enumerated().map { index, file in
+    var files = torrent.files.enumerated().map { index, file in
       DownloadFileItem(index: index, path: file.path.joined(separator: "/"), length: file.length)
+    }
+    // Restore the per-file policy the user configured last session (which the
+    // session also applied inside start()): a paused file stays paused, a
+    // removed file shows as removed, and priorities are re-applied. Without
+    // this a relaunch would silently resume a file the user had paused.
+    if let state = ResumeState.load(infoHashHex: id) {
+      for fileIndex in state.pausedFiles where files.indices.contains(fileIndex) {
+        files[fileIndex].isPaused = true
+      }
+      for (fileIndex, priority) in state.priorities where files.indices.contains(fileIndex) {
+        files[fileIndex].priority = priority
+      }
+      for fileIndex in state.removedFiles where files.indices.contains(fileIndex) {
+        files[fileIndex].isRemoved = true
+      }
     }
     items.append(
       DownloadItem(id: id, title: torrent.name, state: initiallyPaused ? .paused : .stopped,
@@ -333,6 +348,53 @@ import os
     items[index].files[fileIndex].isPaused = false
     Task { await sessions[itemID]?.setFilePaused(false, fileIndex: fileIndex) }
     Task { await sessions[itemID]?.setFileRemoved(false, fileIndex: fileIndex) }
+  }
+
+  // MARK: - Download-only scope
+
+  /// Restrict the download to a chosen file — and, when `andAfter` is true,
+  /// every file after it — by pausing and trashing every other file that is
+  /// not already fully downloaded. Fully downloaded files are left in place
+  /// (their data is already on disk); files inside the kept range are
+  /// unpaused (or restored, if previously removed) so the download proceeds.
+  func downloadOnly(fileIndex: Int, itemID: String, andAfter: Bool = false) {
+    guard let index = items.firstIndex(where: { $0.id == itemID }),
+      items[index].files.indices.contains(fileIndex)
+    else { return }
+
+    // Snapshot for the completeness check, since trashing mutates the items.
+    let files = items[index].files
+    func isComplete(_ f: DownloadFileItem) -> Bool { f.verifiedBytes >= f.length }
+
+    // Ensure a kept file is active: restore it if it was removed, otherwise
+    // unpause it if it was paused. Complete files that are already active are
+    // left alone to avoid redundant engine calls.
+    func keepActive(_ i: Int) {
+      let f = items[index].files[i]
+      if f.isRemoved {
+        restoreFile(fileIndex: i, itemID: itemID)
+      } else if f.isPaused {
+        setFilePaused(false, fileIndex: i, itemID: itemID)
+      }
+    }
+
+    for (i, file) in files.enumerated() {
+      // The chosen file, and (for "only this and after") every later file,
+      // is kept.
+      if i == fileIndex { continue }
+      if andAfter, i >= fileIndex { continue }
+      // A fully downloaded file stays — it's already on disk.
+      if isComplete(file) { continue }
+      // Pause + trash everything else that isn't finished.
+      removeFile(fileIndex: i, itemID: itemID)
+    }
+
+    // Activate the kept range so the download actually proceeds.
+    if andAfter {
+      for i in fileIndex..<items[index].files.count { keepActive(i) }
+    } else {
+      keepActive(fileIndex)
+    }
   }
 
   // MARK: - Persistence (resume on relaunch)

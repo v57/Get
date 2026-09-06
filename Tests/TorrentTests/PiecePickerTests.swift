@@ -514,3 +514,33 @@ private func makePicker(pieceCount: Int = 10, pieceLength: Int = 16 * 1024) -> P
     picker.request(for: peerA, pipeline: 8)
       == PiecePicker.Block(piece: 0, begin: 0, length: 16 * 1024))
 }
+
+// MARK: - File-aware ordering (current file before later files)
+
+/// A download must finish the frontier's current file before fetching a later
+/// file's pieces, so each file downloads sequentially from its start — the
+/// fix for "pause the first downloading file, then the next one arrives as a
+/// patchwork instead of a run". A peer that lacks the frontier piece but holds
+/// both a current-file piece and later-file pieces must serve the current
+/// file first.
+@Test func prefersFrontierFileOverLaterFile() {
+  // Two files: file 0 = pieces 0..<3, file 1 = pieces 3..<6.
+  var picker = PiecePicker(pieceCount: 6, pieceLength: 16 * 1024, lastPieceLength: 16 * 1024)
+  picker.setFiles([0, 0, 0, 1, 1, 1])
+  // peerA lacks piece 0 (the frontier) but holds piece 1 (file 0) AND pieces
+  // 3, 4 (file 1). It must fetch file 0's piece 1, not file 1's piece 3.
+  picker.setAvailable(Set([1, 2, 3, 4]), on: peerA)
+  #expect(
+    picker.request(for: peerA, pipeline: 4)
+      == PiecePicker.Block(piece: 1, begin: 0, length: 16 * 1024),
+    "a peer holding a current-file piece must serve it before a later file's piece")
+
+  // A peer that holds NOTHING in the frontier's file may still cross into a
+  // later file: the soft fallback keeps the swarm moving — a momentary gap in
+  // the current file must not stall it at 0 KB/s (the strict-gate lesson).
+  picker.setAvailable(Set([3, 4, 5]), on: peerB)
+  #expect(
+    picker.request(for: peerB, pipeline: 4)
+      == PiecePicker.Block(piece: 3, begin: 0, length: 16 * 1024),
+    "a peer with nothing in the frontier's file may fetch a later file (no stall)")
+}

@@ -4,10 +4,18 @@ import Foundation
 /// interrupted download without re-fetching pieces that already verified.
 ///
 /// Stored as JSON at `~/Library/Application Support/Get/<infohash-hex>.state`
-/// (`{ "pieceLength": …, "totalSize": …, "verified": [int…] }`). Writes are
-/// atomic (temp file + rename) so a crash mid-save can never corrupt the
-/// previous snapshot. The verified list is trusted as-is on load; re-hashing
-/// the files on start is a future option.
+/// (`{ "pieceLength": …, "totalSize": …, "verified": [int…], "pausedFiles": …,
+/// "priorities": …, "removedFiles": … }`). Writes are atomic (temp file +
+/// rename) so a crash mid-save can never corrupt the previous snapshot. The
+/// verified list is trusted as-is on load; re-hashing the files on start is a
+/// future option.
+///
+/// Besides verified pieces, this carries the per-file download policy
+/// (paused / priority / removed) so a download's file state survives a
+/// relaunch — a file the user paused last session stays paused, a removed
+/// file stays excluded, and priorities are re-applied. The per-file fields
+/// decode as empty when absent so old state files (written before this was
+/// added) still load.
 public struct ResumeState: Codable, Sendable, Equatable {
   /// The torrent's piece length in bytes.
   public var pieceLength: Int
@@ -15,11 +23,42 @@ public struct ResumeState: Codable, Sendable, Equatable {
   public var totalSize: Int64
   /// Piece indices verified and written to disk (ascending).
   public var verified: [Int]
+  /// File indices the user paused (their pieces are not fetched until resumed).
+  public var pausedFiles: [Int] = []
+  /// File index → download priority (1...4). Unprioritized files (absent)
+  /// are fetched after every prioritized one.
+  public var priorities: [Int: Int] = [:]
+  /// File indices the user removed (excluded from fetching, not counted
+  /// toward completion; their data was deleted).
+  public var removedFiles: [Int] = []
 
-  public init(pieceLength: Int, totalSize: Int64, verified: [Int]) {
+  public init(
+    pieceLength: Int, totalSize: Int64, verified: [Int], pausedFiles: [Int] = [],
+    priorities: [Int: Int] = [:], removedFiles: [Int] = []
+  ) {
     self.pieceLength = pieceLength
     self.totalSize = totalSize
     self.verified = verified
+    self.pausedFiles = pausedFiles
+    self.priorities = priorities
+    self.removedFiles = removedFiles
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case pieceLength, totalSize, verified, pausedFiles, priorities, removedFiles
+  }
+
+  /// Decode tolerantly: the per-file fields are optional so a state file
+  /// written before they existed (old schema) still loads, defaulting to no
+  /// per-file policy.
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    pieceLength = try container.decode(Int.self, forKey: .pieceLength)
+    totalSize = try container.decode(Int64.self, forKey: .totalSize)
+    verified = try container.decode([Int].self, forKey: .verified)
+    pausedFiles = try container.decodeIfPresent([Int].self, forKey: .pausedFiles) ?? []
+    priorities = try container.decodeIfPresent([Int: Int].self, forKey: .priorities) ?? [:]
+    removedFiles = try container.decodeIfPresent([Int].self, forKey: .removedFiles) ?? []
   }
 
   /// The on-disk location of this torrent's resume state:
@@ -38,6 +77,14 @@ public struct ResumeState: Codable, Sendable, Equatable {
   /// missing or unreadable (corrupt JSON, wrong types, …).
   public static func load(infoHash: Data) -> ResumeState? {
     let url = fileURL(infoHash: infoHash)
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return try? JSONDecoder().decode(ResumeState.self, from: data)
+  }
+
+  /// Load the persisted state for an infohash already formatted as hex
+  /// (matching how the app keys downloads).
+  public static func load(infoHashHex: String) -> ResumeState? {
+    let url = fileURL(infoHashHex: infoHashHex)
     guard let data = try? Data(contentsOf: url) else { return nil }
     return try? JSONDecoder().decode(ResumeState.self, from: data)
   }

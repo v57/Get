@@ -370,6 +370,107 @@ private func waitForState(
   #expect(try Data(contentsOf: dir.appendingPathComponent("pause/b.bin")) == fileB)
 }
 
+@Test func testPauseFirstFileDownloadsNextSequentially() async throws {
+  // User repro (bug 1): pause the FIRST file mid-download and confirm the
+  // NEXT file is requested in ascending (sequential) order, not scattered.
+  // File A = pieces 0-2, File B = pieces 3-5.
+  let fileA = makeContent(48 * 1024)
+  let fileB = makeContent(48 * 1024)
+  let content = fileA + fileB
+  let files: [(path: [String], data: Data)] = [(["a.bin"], fileA), (["b.bin"], fileB)]
+  let seeder = try FakeSeeder(
+    content: content, pieceLength: 16 * 1024, infoHash: [UInt8](repeating: 0xAB, count: 20),
+    peerID: Array("-FAKE_SEEDER-0000000".utf8))
+  defer { seeder.stop() }
+  let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+  let bundle = try SyntheticTorrent.make(
+    data: Data(), pieceLength: 16 * 1024, name: "pausefirst", files: files,
+    announce: tracker.url.absoluteString)
+  seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+  let dir = try makeTempDir("pausefirst")
+  defer { removeTempDir(dir) }
+  var settings = TorrentSettings()
+  settings.saveDirectory = dir
+
+  let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+  let events = await session.events
+  try await session.start()
+
+  // Wait for the first verified piece (file A download started).
+  var sawPiece = false
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: .seconds(10))
+  for await event in events {
+    if case .pieceVerified = event { sawPiece = true; break }
+    if clock.now > deadline { break }
+  }
+  #expect(sawPiece, "no piece verified before pause")
+
+  // Pause file A (index 0) and let the download continue into file B.
+  await session.setFilePaused(true, fileIndex: 0)
+  let completed = await waitForState(.completed, in: events, timeout: .seconds(15))
+  #expect(completed, "download did not complete after pausing file 0")
+
+  // File A's pieces must have been requested first, then file B's ascending.
+  let requested = seeder.requestedPieces
+  let bPieces = requested.filter { [3, 4, 5].contains($0) }
+  #expect(
+    bPieces == bPieces.sorted(),
+    "file B pieces were not requested sequentially: \(bPieces)")
+}
+
+@Test func testPauseEarlierFilesThenActiveFileSequentialHead() async throws {
+  // Repro: pause files 0..N-2, download the LAST file. The last file's
+  // sequential head must track its own download even though earlier files are
+  // paused — pausing an earlier file must not starve the active file's head.
+  let fileA = makeContent(16 * 1024)   // piece 0
+  let fileB = makeContent(20 * 1024)   // pieces 1, 2-36K (piece 2 straddles B/C)
+  let fileC = makeContent(20 * 1024)   // piece 2 (36-48K) + piece 3 (48-56K); starts mid-piece 2
+  let content = fileA + fileB + fileC
+  let files: [(path: [String], data: Data)] = [
+    (["a.bin"], fileA), (["b.bin"], fileB), (["c.bin"], fileC)]
+  let seeder = try FakeSeeder(
+    content: content, pieceLength: 16 * 1024, infoHash: [UInt8](repeating: 0xAA, count: 20),
+    peerID: Array("-FAKE_SEEDER-0000000".utf8))
+  defer { seeder.stop() }
+  let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+  let bundle = try SyntheticTorrent.make(
+    data: Data(), pieceLength: 16 * 1024, name: "seqhead", files: files,
+    announce: tracker.url.absoluteString)
+  seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+
+  let dir = try makeTempDir("seqhead")
+  defer { removeTempDir(dir) }
+  var settings = TorrentSettings()
+  settings.saveDirectory = dir
+
+  let session = TorrentSession(torrent: bundle.torrent, settings: settings)
+  let events = await session.events
+  // Pause files 0 and 1 (a.bin, b.bin); download c.bin (index 2) only.
+  await session.setFilePaused(true, fileIndex: 0)
+  await session.setFilePaused(true, fileIndex: 1)
+  try await session.start()
+
+  // Paused files hold the download from *completing* (pausing never completes
+  // a download) — so wait on the active file's sequential head, not .completed.
+  var cHead: Int64 = -1
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: .seconds(15))
+  for await event in events {
+    if case .stats(let s) = event, s.fileSequentialBytes.count == files.count {
+      cHead = s.fileSequentialBytes[2]
+      if cHead >= Int64(fileC.count) { break }
+    }
+    if clock.now > deadline { break }
+  }
+  // c.bin (index 2) must reach a full sequential head while a.bin/b.bin paused.
+  #expect(
+    cHead >= Int64(fileC.count),
+    "active file c.bin did not reach a full sequential head while earlier files paused: \(cHead)")
+  #expect(try Data(contentsOf: dir.appendingPathComponent("seqhead/c.bin")) == fileC)
+}
+
 @Test func testWholeDownloadPauseResume() async throws {
   // Pause() must stop requests; resume() must wake the idle peer loop and
   // finish the download. 1 MiB at 16 KiB pieces, with a serve delay so the

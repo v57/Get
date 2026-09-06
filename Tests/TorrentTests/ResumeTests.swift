@@ -333,3 +333,117 @@ private func grabDeadPort() -> UInt16 {
   #expect(completed, "session stalled: failed-connect peers consumed the limited peer slots")
   #expect(try Data(contentsOf: dir.appendingPathComponent("slots.bin")) == content)
 }
+
+@Test func testResumeStateRoundTripsPerFilePolicy() throws {
+  // The per-file policy (paused / priority / removed) must survive a
+  // save→load round-trip, so a relaunch keeps the file layout the user set.
+  let infoHash = Data((0..<20).map { UInt8(0x50 + $0) })
+  defer { removeResumeState(infoHash: infoHash) }
+  let state = ResumeState(
+    pieceLength: 16 * 1024, totalSize: 96 * 1024, verified: [0, 1],
+    pausedFiles: [2, 4], priorities: [0: 1, 1: 2], removedFiles: [3])
+  state.save(infoHash: infoHash)
+  #expect(ResumeState.load(infoHash: infoHash) == state)
+}
+
+@Test func testResumeStateDecodesOldSchemaWithoutPerFilePolicy() throws {
+  // A state file written before per-file policy was added has only the three
+  // original keys; it must still load with an empty policy (defaults), so old
+  // resume files are not rejected as corrupt.
+  let infoHash = Data((0..<20).map { UInt8(0x30 + $0) })
+  defer { removeResumeState(infoHash: infoHash) }
+  let hex = infoHash.map { String(format: "%02x", $0) }.joined()
+  let url = ResumeState.fileURL(infoHashHex: hex)
+  try FileManager.default.createDirectory(
+    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+  try Data(#"{"pieceLength":16384,"totalSize":1048576,"verified":[0,1,2]}"#.utf8)
+    .write(to: url)
+  let loaded = ResumeState.load(infoHash: infoHash)
+  #expect(loaded != nil)
+  #expect(loaded?.pausedFiles == [])
+  #expect(loaded?.removedFiles == [])
+  #expect(loaded?.priorities == [:])
+  #expect(loaded?.verified == [0, 1, 2])
+}
+
+// MARK: - Per-file pause survives relaunch
+
+/// The user pauses a file, quits, relaunches: the file must STILL be paused —
+/// not silently resumed. Recreates the session against the same torrent +
+/// save directory (the app's resume-on-relaunch path) and checks the paused
+/// file's pieces are never requested until it is explicitly unpaused.
+@Test func pausedFileStaysPausedAcrossRelaunch() async throws {
+  let fileA = makeContent(48 * 1024)
+  let fileB = makeContent(48 * 1024)
+  let content = fileA + fileB
+  let pieceLength = 16 * 1024
+  let files: [(path: [String], data: Data)] = [(["a.bin"], fileA), (["b.bin"], fileB)]
+  let seeder = try FakeSeeder(
+    content: content, pieceLength: pieceLength, infoHash: [UInt8](repeating: 0xBE, count: 20),
+    peerID: Array("-FAKE_SEEDER-0000000".utf8))
+  defer { seeder.stop() }
+  let tracker = try FakeTracker(peers: compactPeer(port: seeder.port), interval: 60)
+  let bundle = try SyntheticTorrent.make(
+    data: Data(), pieceLength: pieceLength, name: "relaunch", files: files,
+    announce: tracker.url.absoluteString)
+  seeder.infoHash = [UInt8](bundle.torrent.infoHash)
+  defer { removeResumeState(infoHash: bundle.torrent.infoHash) }
+  _ = SocketSignalSetup.installed
+
+  let dir = try makeTempDir("relaunch")
+  defer { removeTempDir(dir) }
+  var settings = TorrentSettings()
+  settings.saveDirectory = dir
+
+  // Session 1: pause file B, download file A fully, cancel.
+  removeResumeState(infoHash: bundle.torrent.infoHash)
+  let first = TorrentSession(torrent: bundle.torrent, settings: settings)
+  let firstEvents = await first.events
+  await first.setFilePaused(true, fileIndex: 1)
+  try await first.start()
+
+  var verifiedA = 0
+  var completed1 = false
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: .seconds(15))
+  for await event in firstEvents {
+    if case .pieceVerified = event { verifiedA += 1 }
+    if case .state(let s) = event, s == .completed { completed1 = true; break }
+    if clock.now > deadline { break }
+  }
+  // Only A's 3 pieces are fetchable while B is paused; the download must not
+  // complete (a paused file still counts toward completion).
+  #expect(verifiedA == 3, "file A did not fully download while B was paused: \(verifiedA)")
+  #expect(!completed1, "download must not complete while a file is paused")
+  await first.cancel()
+  guard let saved = ResumeState.load(infoHash: bundle.torrent.infoHash) else {
+    Issue.record("no resume state persisted after cancel")
+    return
+  }
+  #expect(saved.pausedFiles == [1], "paused file was not persisted: \(saved.pausedFiles)")
+
+  // Session 2 (relaunch): the paused file must still be paused — while A is
+  // already verified, no B piece may be requested.
+  let second = TorrentSession(torrent: bundle.torrent, settings: settings)
+  let secondEvents = await second.events
+  try await second.start()
+
+  let pollDeadline = clock.now.advanced(by: .seconds(3))
+  while clock.now < pollDeadline { try await Task.sleep(for: .milliseconds(300)) }
+  #expect(
+    !seeder.requestedPieces.contains(3) && !seeder.requestedPieces.contains(4)
+      && !seeder.requestedPieces.contains(5),
+    "relaunched session fetched a paused file's pieces: \(seeder.requestedPieces)")
+
+  // Unpause B and let the download finish.
+  await second.setFilePaused(false, fileIndex: 1)
+  var completed = false
+  let deadline2 = clock.now.advanced(by: .seconds(15))
+  for await event in secondEvents {
+    if case .state(let s) = event, s == .completed { completed = true; break }
+    if clock.now > deadline2 { break }
+  }
+  #expect(completed, "download did not complete after unpausing on relaunch")
+  #expect(try Data(contentsOf: dir.appendingPathComponent("relaunch/a.bin")) == fileA)
+  #expect(try Data(contentsOf: dir.appendingPathComponent("relaunch/b.bin")) == fileB)
+}

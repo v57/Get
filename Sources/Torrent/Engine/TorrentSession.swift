@@ -269,6 +269,11 @@ public actor TorrentSession {
       pieceFile.append(layout.fileIndex(ofByteOffset: offset))
     }
     self.pieceFile = pieceFile
+    // Make the picker file-aware so a download finishes the current file
+    // before fetching a later file's pieces (each file downloads sequentially
+    // from its start). Single-file torrents set a single-file mapping; the
+    // picker treats every piece as file 0, i.e. no cross-file restriction.
+    self.picker.setFiles(pieceFile)
 
     self.stats = TorrentStats(
       totalBytes: torrent.totalSize,
@@ -277,12 +282,11 @@ public actor TorrentSession {
     // The inbound acceptor is created in start() (its closure captures
     // self, which is not safe during init).
     // Apply any priorities set before start(): the default order is
-    // ascending; priorities reorder it.
+    // ascending; priorities reorder it. With no paused/removed files every
+    // piece maps to the first file it overlaps (== its start-byte file).
     self.picker.setOrder(
       Self.priorityOrder(
-        pieceCount: pieceCount, verified: [], priorities: [:], pieceFile: pieceFile,
-        pausedFiles: [], removedFiles: []
-      ))
+        pieceCount: pieceCount, verified: [], priorities: [:], fetchFile: pieceFile))
   }
 
   public static func parse(url: URL) throws -> TorrentFile { try TorrentFile.parse(url: url) }
@@ -485,45 +489,76 @@ public actor TorrentSession {
       entry.value >= 1 && entry.value <= 4 && entry.key >= 0 && entry.key < layout.entries.count
     }
     rebuildOrder()
+    saveResumeState()
   }
 
   /// Pause or resume one file: paused files' pieces drop out of the fetch
   /// order entirely (in-flight pieces still complete), so nothing more is
   /// downloaded for them until they're resumed. Applies to a running
-  /// download immediately.
+  /// download immediately. Persisted so a relaunch keeps the file paused.
   public func setFilePaused(_ paused: Bool, fileIndex: Int) {
     guard fileIndex >= 0, fileIndex < layout.entries.count else { return }
     if paused { pausedFiles.insert(fileIndex) } else { pausedFiles.remove(fileIndex) }
     rebuildOrder()
+    saveResumeState()
   }
 
   /// Rebuild the picker's fetch order from the current priorities and
-  /// paused files: unverified pieces sorted by (file priority, piece
+  /// paused/removed files: unverified pieces sorted by (file priority, piece
   /// index), with unprioritized files (rank 5) after all prioritized ones;
-  /// pieces of paused files are excluded.
+  /// pieces whose overlapping files are ALL paused/removed are excluded.
   private func rebuildOrder() {
     picker.setOrder(
       Self.priorityOrder(
         pieceCount: picker.pieceCount, verified: verifiedPieces, priorities: filePriorities,
-        pieceFile: pieceFile, pausedFiles: pausedFiles, removedFiles: removedFiles))
+        fetchFile: computeFetchFile()))
+  }
+
+  /// Compute the order's fetchable-file attribution: for each piece, the first
+  /// file it overlaps that is NOT paused/removed (or -1 if every overlapping
+  /// file is paused/removed, i.e. the piece is not fetchable).
+  ///
+  /// This is the fix for "pausing the first files starves the last file's
+  /// start": a piece can straddle a paused file and an active one (e.g. the
+  /// active file begins mid-piece inside a paused file's last piece). That
+  /// piece must still be fetched so the ACTIVE file's leading bytes download
+  /// and its sequential head grows — excluding it on the start-byte ownership
+  /// of the paused file leaves the active file truncated with a 0 head. The
+  /// piece's bytes in the paused file are written too (a paused file is not
+  /// removed, so DiskWriter does not skip it), which is a negligible
+  /// side-effect of downloading the shared boundary piece.
+  private func computeFetchFile() -> [Int] {
+    var fetch = [Int](repeating: -1, count: picker.pieceCount)
+    for piece in 0..<picker.pieceCount {
+      let start = Int64(piece) * Int64(torrent.pieceLength)
+      let end = min(start + Int64(torrent.pieceLength), torrent.totalSize)
+      for file in 0..<layout.entries.count {
+        let fileStart = file == 0 ? 0 : layout.fileEnds[file - 1]
+        let fileEnd = layout.fileEnds[file]
+        if end > fileStart, start < fileEnd, !pausedFiles.contains(file),
+          !removedFiles.contains(file)
+        {
+          fetch[piece] = file
+          break
+        }
+      }
+    }
+    return fetch
   }
 
   /// Compute the fetch order: unverified pieces sorted by (file priority,
   /// piece index), unprioritized files (rank 5) after all prioritized ones,
-  /// pieces of paused files and removed files excluded. Pure — usable from
-  /// `init` before the actor is fully initialized.
+  /// pieces with no fetchable file (`fetchFile[piece] == -1`) excluded. Pure —
+  /// usable from `init` before the actor is fully initialized.
   private static func priorityOrder(
-    pieceCount: Int, verified: Set<Int>, priorities: [Int: Int], pieceFile: [Int],
-    pausedFiles: Set<Int>, removedFiles: Set<Int>
+    pieceCount: Int, verified: Set<Int>, priorities: [Int: Int], fetchFile: [Int]
   ) -> [Int] {
     func rank(of piece: Int) -> Int {
-      let file = pieceFile[piece]
+      let file = fetchFile[piece]
       return priorities[file] ?? 0 > 0 ? priorities[file]! : 5
     }
     let unverified = (0..<pieceCount).filter { !verified.contains($0) }
-    return unverified.filter {
-      !pausedFiles.contains(pieceFile[$0]) && !removedFiles.contains(pieceFile[$0])
-    }.sorted { a, b in
+    return unverified.filter { fetchFile[$0] >= 0 }.sorted { a, b in
       let ra = rank(of: a)
       let rb = rank(of: b)
       if ra != rb { return ra < rb }
@@ -556,6 +591,7 @@ public actor TorrentSession {
     for piece in ownedPieces { unverify(piece) }
     removedFiles.insert(fileIndex)
     rebuildOrder()
+    saveResumeState()
     // Cancel in-flight blocks for the removed file's pieces so peers don't keep
     // serving them (handlePiece also drops them if one still arrives).
     let peersSnapshot = peers
@@ -581,6 +617,7 @@ public actor TorrentSession {
     removedFiles.remove(fileIndex)
     await disk.setRemovedFiles(removedFiles)
     rebuildOrder()
+    saveResumeState()
     refreshStats()
     emit(.stats(stats))
   }
@@ -1168,19 +1205,39 @@ public actor TorrentSession {
         "resume state: adopted \(adopted, privacy: .public) of \(resume.verified.count, privacy: .public) claimed verified pieces"
       )
     }
+    // Restore the per-file policy (paused / removed / priorities) so a
+    // relaunch keeps the file layout the user configured: a paused file stays
+    // out of the fetch order, a removed file stays excluded and not counted
+    // toward completion, and priorities reorder fetching. The removed-file
+    // set is pushed to the disk before prepare() so a removed file is never
+    // created/resurrected. These are the same fields the session mutates
+    // during a run (setFilePaused/setFileRemoved/setFilePriorities), so a
+    // live session and a restored one stay consistent.
+    pausedFiles = Set(resume.pausedFiles)
+    removedFiles = Set(resume.removedFiles)
+    filePriorities = resume.priorities
+    await disk.setRemovedFiles(removedFiles)
     // The order must exclude the resumed verified pieces — the frontier
     // becomes the first unverified piece in the (priority) order.
     rebuildOrder()
   }
 
-  /// Persist the current verified-piece set so a later session can resume
-  /// without re-fetching. Best effort — a failed write never fails the
-  /// download.
+  /// Persist the current verified-piece set (+ per-file pause/priority/remove
+  /// policy) so a later session can resume without re-fetching and without
+  /// losing which files the user paused/prioritized/removed. Best effort — a
+  /// failed write never fails the download.
   private func saveResumeState() {
-    guard !verifiedPieces.isEmpty else { return }
+    // Persist whenever there is anything to resume: verified pieces, or a
+    // non-empty per-file policy (a file paused/removed/prioritized before any
+    // piece verified must survive a relaunch too).
+    let hasPolicy = !pausedFiles.isEmpty || !removedFiles.isEmpty || !filePriorities.isEmpty
+    guard !verifiedPieces.isEmpty || hasPolicy else { return }
     ResumeState(
       pieceLength: torrent.pieceLength, totalSize: torrent.totalSize,
-      verified: verifiedPieces.sorted()
+      verified: verifiedPieces.sorted(),
+      pausedFiles: pausedFiles.sorted(),
+      priorities: filePriorities,
+      removedFiles: removedFiles.sorted()
     ).save(infoHash: torrent.infoHash)
   }
 

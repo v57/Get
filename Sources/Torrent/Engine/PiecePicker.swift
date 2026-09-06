@@ -62,6 +62,15 @@ public struct PiecePicker: Sendable {
   /// the real next-needed piece, never past a gap.
   public private(set) var completed: Set<Int> = []
 
+  /// Piece → file index, set by the session from the file layout. When empty
+  /// (unset, or single-file torrents set it to a single-file mapping) every
+  /// piece is treated as belonging to file 0, so the picker imposes no
+  /// cross-file restriction and behaves exactly as before. When set for a
+  /// multi-file torrent, `request` prefers the frontier's file so a download
+  /// finishes the current file before fetching a later file's pieces — the
+  /// reason a paused file's successor downloads sequentially from its start.
+  public private(set) var pieceFile: [Int] = []
+
   public struct BlockKey: Hashable, Sendable {
     public let piece: Int
     public let begin: Int
@@ -102,6 +111,12 @@ public struct PiecePicker: Sendable {
     completed = []
   }
 
+  /// Record the piece → file mapping so `request` can prefer the frontier's
+  /// file and keep a download file-sequential. A no-op when `pieceFile` is
+  /// empty (the single-file / unset case, where no cross-file restriction
+  /// applies).
+  public mutating func setFiles(_ pieceFile: [Int]) { self.pieceFile = pieceFile }
+
   /// Replace the peer's announced availability with `pieces`.
   public mutating func setAvailable(_ pieces: Set<Int>, on peer: PeerID) { peerHas[peer] = pieces }
 
@@ -121,15 +136,44 @@ public struct PiecePicker: Sendable {
   public mutating func request(for peer: PeerID, pipeline: Int) -> Block? {
     guard pending[peer, default: []].count < pipeline else { return nil }
     guard cursorPos < order.count else { return nil }
-    // Soft sequential: scan from the cursor. A peer WITH the frontier piece
-    // serves it first (it is the earliest piece in the scan); a peer that
-    // lacks it fetches the next available piece rather than idling. The
-    // strict gate that stalled every peer when the frontier was momentarily
-    // unheld is gone — a gap in the strict order must never stop the swarm.
+    // Prefer the frontier's file: a download should finish the current file
+    // before it fetches a later file's pieces, so each file downloads
+    // sequentially from its start. Otherwise a peer that has the next file
+    // but lacks the frontier's remaining pieces grabs that next file's pieces
+    // ahead of time, scattering it — so when the user pauses the current file
+    // and moves on, the next file is a patchwork rather than a run. File
+    // awareness is off when `pieceFile` is empty (single-file/unset).
+    if let frontierFile = frontierFileIndex, let block = earliestBlock(for: peer, inFile: frontierFile)
+    {
+      return block
+    }
+    // Soft-sequential fallback: the peer has nothing requestable in the
+    // frontier's file (its remaining pieces are held by other peers, or the
+    // frontier is momentarily unheld). Fetch the earliest available piece
+    // anywhere at/after the cursor so a gap never stalls the swarm at 0 KB/s
+    // (the strict gate that started this — reintroducing it is not an option).
+    return earliestBlock(for: peer, inFile: nil)
+  }
+
+  /// The piece → file index of the frontier (or nil when the picker is not
+  /// file-aware, i.e. `pieceFile` is empty).
+  private var frontierFileIndex: Int? {
+    guard !pieceFile.isEmpty, cursorPos < order.count else { return nil }
+    let piece = order[cursorPos]
+    return piece < pieceFile.count ? pieceFile[piece] : nil
+  }
+
+  /// Scan from the cursor for the earliest block this peer can fetch. When
+  /// `file` is non-nil only pieces belonging to that file are considered
+  /// (used to keep a download within the frontier's file); when nil every
+  /// piece at/after the cursor qualifies. Respects the per-peer pipeline
+  /// limit already checked by `request(for:pipeline:)`.
+  private mutating func earliestBlock(for peer: PeerID, inFile file: Int?) -> Block? {
     var pos = cursorPos
     while pos < order.count {
       let piece = order[pos]
       if completed.contains(piece) { pos += 1; continue }
+      if let file, piece < pieceFile.count, pieceFile[piece] != file { pos += 1; continue }
       if peerHas[peer]?.contains(piece) == true {
         let blocks = blockCount(of: piece)
         let alreadyReceived = received[piece] ?? []

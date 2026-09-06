@@ -17,7 +17,7 @@ struct TorrentView: View {
     } detail: {
       if let id = selectedID, let item = store.items.first(where: { $0.id == id }) {
         TorrentDetailView(store: store, itemID: item.id)
-      } else {
+      } else if !store.items.isEmpty {
         ContentUnavailableView(
           "Select a Download", systemImage: "arrow.down.circle",
           description: Text("Choose a download from the sidebar."))

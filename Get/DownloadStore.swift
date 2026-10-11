@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Observation
@@ -59,9 +60,12 @@ import os
     var fileOrder: [Int] = []
     /// `files` in display order.
     var orderedFiles: [DownloadFileItem] { fileOrder.map { files[$0] } }
-    /// Set when the download finishes and its files are moved out of
-    /// `Downloading` into `Downloads` — the location Trash should use.
-    var finalURL: URL?
+    /// Where the download is on disk: the single file, or the folder of a
+    /// multi-file torrent. Staged under `Downloading` while active, then in
+    /// `Downloads` once finished (and moved). Nil until known.
+    var location: URL?
+    /// The download is one file at `location` (not a folder of files).
+    var isSingleFile = true
   }
 
   private(set) var items: [DownloadItem] = []
@@ -186,7 +190,10 @@ import os
     items.append(
       DownloadItem(
         id: id, title: torrent.name, state: initiallyPaused ? .paused : .stopped, files: files,
-        fileOrder: torrent.naturalFileOrder))
+        fileOrder: torrent.naturalFileOrder,
+        isSingleFile: torrent.files.count == 1 && torrent.files[0].path == [torrent.name]))
+    let location = await session.dataRootURL()
+    items.firstIndex { $0.id == id }.map { items[$0].location = location }
 
     let task = Task { [weak self] in
       defer { self?.eventTasks[id] = nil }
@@ -232,21 +239,14 @@ import os
     }
     await session.cancel()
 
-    // Target the moved-to-Downloads location if the download finished;
-    // otherwise the still-staged location under Downloading.
-    let stagedRoot = await session.dataRootURL()
-    let root: URL
-    if let index = items.firstIndex(where: { $0.id == itemID }),
-      let finalURL = items[index].finalURL
-    {
-      root = finalURL
-    } else {
-      root = stagedRoot
-    }
+    // The moved-to-Downloads location if the download finished; otherwise
+    // the still-staged location under Downloading.
+    var root = items.first { $0.id == itemID }?.location
+    if root == nil { root = await session.dataRootURL() }
 
     // Move the download's files to the Trash (best effort — a download
     // that never wrote anything has nothing to trash).
-    try? FileManager.default.trashItem(at: root, resultingItemURL: nil)
+    if let root { try? FileManager.default.trashItem(at: root, resultingItemURL: nil) }
 
     items.removeAll { $0.id == itemID }
     removeTorrentCopy(id: itemID)
@@ -404,6 +404,56 @@ import os
     for i in kept { keepActive(i) }
   }
 
+  // MARK: - Open and reveal
+
+  /// The download on disk, if it is there yet.
+  func existingLocation(itemID: String) -> URL? {
+    guard let url = items.first(where: { $0.id == itemID })?.location,
+      FileManager.default.fileExists(atPath: url.path)
+    else { return nil }
+    return url
+  }
+
+  /// One file of a torrent on disk, if it is there yet (a file that has not
+  /// received data, or a removed one, has no file).
+  func existingFileURL(fileIndex: Int, itemID: String) -> URL? {
+    guard let item = items.first(where: { $0.id == itemID }), let root = item.location,
+      item.files.indices.contains(fileIndex)
+    else { return nil }
+    let url =
+      item.isSingleFile
+      ? root
+      : item.files[fileIndex].path.split(separator: "/").reduce(root) {
+        $0.appendingPathComponent(String($1))
+      }
+    return FileManager.default.fileExists(atPath: url.path) ? url : nil
+  }
+
+  /// Show the download in Finder, selected in its folder.
+  func reveal(itemID: String) {
+    guard let url = existingLocation(itemID: itemID) else { return }
+    NSWorkspace.shared.activateFileViewerSelecting([url])
+  }
+
+  /// Open a single-file download in its default app. Works while it is
+  /// still downloading (a video can play as it arrives).
+  func open(itemID: String) {
+    guard items.first(where: { $0.id == itemID })?.isSingleFile == true,
+      let url = existingLocation(itemID: itemID)
+    else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  func revealFile(fileIndex: Int, itemID: String) {
+    guard let url = existingFileURL(fileIndex: fileIndex, itemID: itemID) else { return }
+    NSWorkspace.shared.activateFileViewerSelecting([url])
+  }
+
+  func openFile(fileIndex: Int, itemID: String) {
+    guard let url = existingFileURL(fileIndex: fileIndex, itemID: itemID) else { return }
+    NSWorkspace.shared.open(url)
+  }
+
   // MARK: - Persistence (resume on relaunch)
 
   /// Copy a `.torrent` file into the app's library so the download can be
@@ -532,8 +582,8 @@ import os
         }
       }
 
-      // Record the final location so Trash targets the moved files.
-      if let i = items.firstIndex(where: { $0.id == itemID }) { items[i].finalURL = to }
+      // Record the final location so Trash and Open target the moved files.
+      if let i = items.firstIndex(where: { $0.id == itemID }) { items[i].location = to }
 
       // A finished download is no longer "active": drop its resume
       // state and persisted copy so relaunch won't re-add it.

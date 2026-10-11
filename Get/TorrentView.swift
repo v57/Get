@@ -87,7 +87,8 @@ struct TorrentView: View {
       ForEach(store.items) { item in
         SidebarRow(
           item: item, onTogglePause: { store.togglePause(itemID: item.id) },
-          onTrash: { Task { await store.trash(itemID: item.id) } }
+          onTrash: { Task { await store.trash(itemID: item.id) } },
+          onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) }
         ).tag(item.id)
       }
     }.navigationTitle("Downloads").overlay {
@@ -105,6 +106,8 @@ private struct SidebarRow: View {
   let item: DownloadStore.DownloadItem
   let onTogglePause: () -> Void
   let onTrash: () -> Void
+  let onOpen: () -> Void
+  let onReveal: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
@@ -124,6 +127,9 @@ private struct SidebarRow: View {
         Text("\(Int(item.progress * 100))%").monospacedDigit()
       }.contentTransition(.numericText()).font(.caption2).foregroundStyle(.secondary)
     }.padding(.vertical, 2).contextMenu {
+      if item.isSingleFile { Button("Open") { onOpen() } }
+      Button("Show in Finder") { onReveal() }
+      Divider()
       if item.state == .downloading || item.state == .paused {
         Button(item.state == .paused ? "Resume" : "Pause") { onTogglePause() }
       }
@@ -153,10 +159,18 @@ private struct TorrentDetailView: View {
             onTogglePause: { store.toggleFilePaused(fileIndex: file.index, itemID: itemID) },
             onRemove: { store.removeFile(fileIndex: file.index, itemID: itemID) },
             onRestore: { store.restoreFile(fileIndex: file.index, itemID: itemID) }
-          ).contentShape(Rectangle()).onTapGesture {
+          ).contentShape(Rectangle()).onTapGesture(count: 2) {
+            guard !priorityMode else { return }
+            store.openFile(fileIndex: file.index, itemID: itemID)
+          }.onTapGesture {
             guard priorityMode else { return }
             togglePriority(for: file)
           }.contextMenu {
+            let onDisk = store.existingFileURL(fileIndex: file.index, itemID: itemID) != nil
+            Button("Open") { store.openFile(fileIndex: file.index, itemID: itemID) }
+              .disabled(!onDisk)
+            Button("Show in Finder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
+              .disabled(!onDisk)
             // Restrict the download to this file (or this file and every file
             // after it): every other file that isn't fully downloaded is
             // paused and trashed.
@@ -175,6 +189,7 @@ private struct TorrentDetailView: View {
       }
     }.safeAreaInset(edge: .top) { VStack { header }.padding(.horizontal) }.tint(.red)
       .navigationTitle(item.title).toolbar {
+        LocationToolbar(store: store, item: item)
         ToolbarItem(placement: .primaryAction) {
           if !item.files.isEmpty, item.state == .downloading || item.state == .paused {
             Button(priorityMode ? "Done" : "Priority") {
@@ -234,6 +249,33 @@ private struct TorrentDetailView: View {
       let used = Set(item.files.map(\.priority).filter { $0 > 0 })
       let next = (1...4).first { !used.contains($0) }
       if let next { store.setPriority(next, fileIndex: file.index, itemID: itemID) }
+    }
+  }
+}
+
+/// Toolbar buttons that open the download in its default app (single-file
+/// downloads) and show it in Finder. Disabled until it exists on disk.
+struct LocationToolbar: ToolbarContent {
+  let store: DownloadStore
+  let item: DownloadStore.DownloadItem
+
+  var body: some ToolbarContent {
+    let onDisk = store.existingLocation(itemID: item.id) != nil
+    ToolbarItem(placement: .automatic) {
+      Button {
+        store.reveal(itemID: item.id)
+      } label: {
+        Label("Show in Finder", systemImage: "folder")
+      }.help("Show in Finder").disabled(!onDisk)
+    }
+    if item.isSingleFile {
+      ToolbarItem(placement: .automatic) {
+        Button {
+          store.open(itemID: item.id)
+        } label: {
+          Label("Open", systemImage: "arrow.up.forward.app")
+        }.help("Open in its default app").disabled(!onDisk)
+      }
     }
   }
 }

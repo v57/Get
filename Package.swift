@@ -5,7 +5,10 @@ import PackageDescription
 
 let package = Package(
   name: "Get", platforms: [.macOS(.v13)],
-  products: [.library(name: "Torrent", targets: ["Torrent"])],
+  products: [
+    .library(name: "Torrent", targets: ["Torrent"]),
+    .library(name: "URLDownload", targets: ["URLDownload"]),
+  ],
   targets: [
     .target(
       name: "DownloadCore",
@@ -13,10 +16,16 @@ let package = Package(
     .target(
       name: "Torrent", dependencies: ["DownloadCore"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+    .target(
+      name: "URLDownload", dependencies: ["DownloadCore"],
+      swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .testTarget(
       name: "DownloadCoreTests", dependencies: ["DownloadCore"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .testTarget(
       name: "TorrentTests", dependencies: ["Torrent"],
+      swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+    .testTarget(
+      name: "URLDownloadTests", dependencies: ["URLDownload"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
   ])

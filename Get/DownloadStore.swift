@@ -439,6 +439,9 @@ import os
     switch event {
     case .state(let state):
       items[index].state = state
+      // Speed is only meaningful while downloading; a finished, paused or
+      // failed download must not keep showing its last reading.
+      if state != .downloading { items[index].speed = "" }
       if case .failed(let message) = state {
         items[index].error = message
         Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
@@ -457,7 +460,8 @@ import os
       }
     case .stats(let stats):
       items[index].progress = stats.progress
-      items[index].speed = Self.formatSpeed(stats.downloadSpeed)
+      items[index].speed =
+        items[index].state == .downloading ? Self.formatSpeed(stats.downloadSpeed) : ""
       items[index].peers = stats.peersConnected
       items[index].seeders = stats.seedersConnected
       items[index].trackerSeeders = stats.trackerSeeders

@@ -7,7 +7,15 @@ let package = Package(
   name: "Get", platforms: [.macOS(.v13)],
   products: [.library(name: "Torrent", targets: ["Torrent"])],
   targets: [
-    .target(name: "Torrent", swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+    .target(
+      name: "DownloadCore",
+      swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+    .target(
+      name: "Torrent", dependencies: ["DownloadCore"],
+      swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
+    .testTarget(
+      name: "DownloadCoreTests", dependencies: ["DownloadCore"],
+      swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .testTarget(
       name: "TorrentTests", dependencies: ["Torrent"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),

@@ -1,4 +1,5 @@
 import CryptoKit
+import DownloadCore
 import Foundation
 import os
 
@@ -225,7 +226,12 @@ public actor TorrentSession {
   /// Accepts inbound peer connections (created when `settings.useInbound`).
   private var acceptor: PeerAcceptor?
   private var announcedPeers: [TrackerPeer] = []
-  private var bytesAtLastTick: Int64 = 0
+  /// Block payload bytes received from peers (duplicates and later-failed
+  /// pieces included): what the network delivers, as it arrives. Speed is
+  /// measured on this rather than on verified bytes, which only grow a whole
+  /// piece at a time and made the speed jump between 0 and the full rate.
+  private var receivedBytes: Int64 = 0
+  private var speedMeter = SpeedMeter()
   /// Seed/leech counts from the last successful announce (tracker-reported).
   private var trackerSeeders: Int?
   private var trackerLeechers: Int?
@@ -402,6 +408,8 @@ public actor TorrentSession {
     paused = true
     state = .paused
     emit(.state(.paused))
+    speedMeter.reset()
+    stats.downloadSpeed = 0
     // Stop in-flight traffic decisively: ask each peer to drop the blocks we
     // queued and free the picker's pending slots so nothing more is fetched.
     // (Blocks that already reached us still complete and verify — that keeps
@@ -1063,6 +1071,7 @@ public actor TorrentSession {
     // Feed the peer's rate tracker so its pipeline depth adapts to its
     // measured speed (deep queue for fast peers, shallow for slow).
     peerRates[key, default: PeerRateTracker()].record(bytes: Int64(data.count))
+    receivedBytes += Int64(data.count)
     let pieceSize = picker.pieceSize(of: index)
     let expectedLength = min(settings.blockSize, pieceSize - begin)
     guard begin < pieceSize, data.count == expectedLength else {
@@ -1244,10 +1253,12 @@ public actor TorrentSession {
   private func finishDownload() async {
     guard state != .completed else { return }
     state = .completed
-    // Final stats so the UI shows 100% and full per-file progress
-    // immediately (the 1 Hz stats loop may be up to a second away).
+    // Final stats so the UI shows 100%, full per-file progress (verified AND
+    // sequential) and no speed immediately: the stats loop stops here, so
+    // whatever this emits is what the finished download keeps showing.
+    refreshStats()
     stats.progress = 1
-    stats.fileVerifiedBytes = computeFileProgress()
+    stats.downloadSpeed = 0
     emit(.stats(stats))
     emit(.state(.completed))
     fireAndForgetAnnounce(event: "completed")
@@ -1273,10 +1284,7 @@ public actor TorrentSession {
     while !Task.isCancelled {
       try? await Task.sleep(for: .seconds(1))
       if Task.isCancelled { return }
-      let now = stats.verifiedBytes
-      let delta = now - bytesAtLastTick
-      bytesAtLastTick = now
-      stats.downloadSpeed = Double(delta)
+      stats.downloadSpeed = speedMeter.record(totalBytes: receivedBytes)
       stats.fileVerifiedBytes = computeFileProgress()
       stats.fileSequentialBytes = computeSequentialFileProgress()
       stats.progress = effectiveProgress()

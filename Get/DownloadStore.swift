@@ -3,11 +3,13 @@ import CryptoKit
 import Foundation
 import Observation
 import Torrent
+import URLDownload
 import os
 
-/// Owns the torrent sessions backing the UI. Holds one `DownloadItem` per
-/// active torrent, keyed by infohash hex, and fans session events into the
-/// matching item on the main actor.
+/// Owns the download sessions backing the UI: torrents and plain URL
+/// downloads. Holds one `DownloadItem` per download (keyed by infohash hex,
+/// or `url-<hash>` for URLs) and fans session events into the matching item
+/// on the main actor.
 @MainActor @Observable final class DownloadStore {
   private static let log = Logger(subsystem: "dev.v57.get", category: "store")
 
@@ -37,11 +39,14 @@ import os
     var id: Int { index }
   }
 
-  /// A single torrent download as shown in the list.
+  /// A single download as shown in the list.
   struct DownloadItem: Identifiable {
-    /// Infohash hex — unique per torrent.
+    enum Kind { case torrent, url }
+
+    /// Infohash hex for torrents, `url-<hash>` for URL downloads.
     let id: String
-    let title: String
+    /// Torrent name, or the file name of a URL download (once known).
+    var title: String
     var state: TorrentState = .stopped
     var progress: Double = 0
     var speed: String = ""
@@ -66,14 +71,30 @@ import os
     var location: URL?
     /// The download is one file at `location` (not a folder of files).
     var isSingleFile = true
+
+    var kind: Kind = .torrent
+    /// URL downloads: where the file comes from.
+    var sourceURL: URL?
+    var receivedBytes: Int64 = 0
+    /// File length, when the server reported it.
+    var totalBytes: Int64?
+    /// Parallel connections fetching segments right now.
+    var connections = 0
+    /// The server takes range requests: the download can resume.
+    var resumable = false
+    /// The checksum the user gave, checked when the download finishes.
+    var checksum: Checksum?
+    /// The checksum the finished file matched (the user's or the server's).
+    var verifiedChecksum: Checksum?
   }
 
   private(set) var items: [DownloadItem] = []
 
-  /// Set when `openTorrent` fails, for the view to surface as an alert.
+  /// Set when a download can't start, for the view to surface as an alert.
   var lastError: String?
 
   private var sessions: [String: TorrentSession] = [:]
+  private var urlSessions: [String: URLDownloadSession] = [:]
   private var eventTasks: [String: Task<Void, Never>] = [:]
 
   /// `~/Downloads` — where finished downloads end up.
@@ -94,12 +115,26 @@ import os
       .appendingPathComponent("Get/Torrents", isDirectory: true)
   }
 
-  /// Per-torrent "paused" marker, alongside the `.torrent` copy. Present →
-  /// the download must be restored already-paused on the next launch;
-  /// absent → restore as running. Written on pause, removed on resume.
-  private static func pausedMarkerURL(id: String) -> URL {
-    Self.torrentsDirectory.appendingPathComponent("\(id).paused")
+  /// Where active URL downloads keep their progress records so they resume
+  /// on relaunch: `~/Library/Application Support/Get/URLs/<id>.json`.
+  private static var urlsDirectory: URL {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+      .appendingPathComponent("Get/URLs", isDirectory: true)
   }
+
+  private static func urlRecordURL(id: String) -> URL {
+    urlsDirectory.appendingPathComponent("\(id).json")
+  }
+
+  /// Per-download "paused" marker, alongside the `.torrent` copy or URL
+  /// record. Present → the download must be restored already-paused on the
+  /// next launch; absent → restore as running. Written on pause, removed on
+  /// resume.
+  private static func pausedMarkerURL(id: String) -> URL {
+    (isURLDownload(id) ? urlsDirectory : torrentsDirectory).appendingPathComponent("\(id).paused")
+  }
+
+  private static func isURLDownload(_ id: String) -> Bool { id.hasPrefix("url-") }
 
   init() {
     // Reopen every torrent that was active in a previous run. Sessions
@@ -118,6 +153,17 @@ import os
       Task { try? await openTorrent(url: url, initiallyPaused: wasPaused) }
     }
     if !files.isEmpty { Self.log.info("Resuming \(files.count) saved download(s)") }
+
+    // Same for URL downloads: each record knows how far its segments got.
+    let records =
+      (try? FileManager.default.contentsOfDirectory(
+        at: Self.urlsDirectory, includingPropertiesForKeys: nil)) ?? []
+    for url in records where url.pathExtension == "json" {
+      let id = url.deletingPathExtension().lastPathComponent
+      guard let record = URLDownloadRecord.load(from: url) else { continue }
+      let wasPaused = FileManager.default.fileExists(atPath: Self.pausedMarkerURL(id: id).path)
+      startURLDownload(record: record, id: id, initiallyPaused: wasPaused)
+    }
     Self.removeActiveDirectoryIfEmpty()
   }
 
@@ -209,14 +255,23 @@ import os
 
   /// Stop a download and clean up its session. The files stay on disk and
   /// the item stays listed (as `.stopped`); the persisted `.torrent` copy
-  /// is removed so it does NOT come back on relaunch.
+  /// or URL record is removed so it does NOT come back on relaunch.
   func cancel(itemID: String) {
     eventTasks[itemID]?.cancel()
     eventTasks[itemID] = nil
 
-    guard let session = sessions.removeValue(forKey: itemID) else { return }
-    Task { await session.cancel() }
-    removeTorrentCopy(id: itemID)
+    if let session = sessions.removeValue(forKey: itemID) {
+      Task { await session.cancel() }
+      removeTorrentCopy(id: itemID)
+    } else if let session = urlSessions.removeValue(forKey: itemID) {
+      // The session saves its record while cancelling: remove it after.
+      Task {
+        await session.cancel()
+        Self.removeURLRecord(id: itemID)
+      }
+    } else {
+      return
+    }
     removePausedMarker(id: itemID)
 
     if let index = items.firstIndex(where: { $0.id == itemID }) {
@@ -232,6 +287,18 @@ import os
   func trash(itemID: String) async {
     eventTasks[itemID]?.cancel()
     eventTasks[itemID] = nil
+
+    if let session = urlSessions.removeValue(forKey: itemID) {
+      await session.cancel()
+      if let location = items.first(where: { $0.id == itemID })?.location {
+        try? FileManager.default.trashItem(at: location, resultingItemURL: nil)
+      }
+      items.removeAll { $0.id == itemID }
+      Self.removeURLRecord(id: itemID)
+      removePausedMarker(id: itemID)
+      Self.removeActiveDirectoryIfEmpty()
+      return
+    }
 
     guard let session = sessions.removeValue(forKey: itemID) else {
       items.removeAll { $0.id == itemID }
@@ -262,7 +329,10 @@ import os
     else { return }
     items[index].state = .paused
     persistPausedMarker(id: itemID)
-    Task { await sessions[itemID]?.pause() }
+    Task {
+      await sessions[itemID]?.pause()
+      await urlSessions[itemID]?.pause()
+    }
   }
 
   /// Resume a paused download.
@@ -271,7 +341,19 @@ import os
     else { return }
     items[index].state = .downloading
     removePausedMarker(id: itemID)
-    Task { await sessions[itemID]?.resume() }
+    Task {
+      await sessions[itemID]?.resume()
+      await urlSessions[itemID]?.resume()
+    }
+  }
+
+  /// Try a failed URL download again, from where it stopped.
+  func retry(itemID: String) {
+    guard let index = items.firstIndex(where: { $0.id == itemID }),
+      case .failed = items[index].state, let session = urlSessions[itemID]
+    else { return }
+    items[index].error = nil
+    Task { await session.resume() }
   }
 
   /// Toggle pause/resume for a whole download (for sidebar buttons).
@@ -281,6 +363,161 @@ import os
     } else {
       pause(itemID: itemID)
     }
+  }
+
+  // MARK: - URL downloads
+
+  /// Download a link: http(s) files directly, `.torrent` links as torrents,
+  /// local files as `.torrent` files. `checksum` is checked when a file
+  /// download finishes. Failures surface as `lastError`.
+  func download(from url: URL, checksum: Checksum? = nil) async {
+    if url.isFileURL {
+      await open(url: url)
+      return
+    }
+    switch url.scheme?.lowercased() {
+    case "http", "https": break
+    case "magnet":
+      lastError = "Magnet links aren't supported yet. Open the .torrent file instead."
+      return
+    default:
+      lastError = "Get downloads http and https links."
+      return
+    }
+    if url.pathExtension.lowercased() == "torrent" {
+      await openTorrent(from: url)
+      return
+    }
+    let id = Self.urlDownloadID(url)
+    // Already listed — don't duplicate.
+    guard !items.contains(where: { $0.id == id }) else { return }
+    startURLDownload(record: URLDownloadRecord(url: url, checksum: checksum), id: id)
+  }
+
+  /// Fetch a `.torrent` link and open it as a torrent download.
+  private func openTorrent(from url: URL) async {
+    do {
+      let (file, response) = try await URLSession.shared.download(from: url)
+      defer { try? FileManager.default.removeItem(at: file) }
+      if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+        lastError =
+          "\(url.lastPathComponent): HTTP \(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))"
+        return
+      }
+      try await openTorrent(url: file)
+    } catch {
+      lastError = error.localizedDescription
+    }
+  }
+
+  /// A stable id per link, so the same link isn't downloaded twice at once.
+  private static func urlDownloadID(_ url: URL) -> String {
+    let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
+    return "url-" + digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+  }
+
+  private func startURLDownload(
+    record: URLDownloadRecord, id: String, initiallyPaused: Bool = false
+  ) {
+    let recordURL = Self.urlRecordURL(id: id)
+    // Saved up front, so a relaunch before any progress still brings it back.
+    record.save(to: recordURL)
+    let session = URLDownloadSession(
+      record: record, saveDirectory: Self.activeDirectory, recordURL: recordURL)
+    urlSessions[id] = session
+
+    let name = record.url.lastPathComponent
+    var item = DownloadItem(
+      id: id, title: record.filename ?? (name.isEmpty || name == "/" ? record.url.host() ?? "Download" : name),
+      state: initiallyPaused ? .paused : .stopped)
+    item.kind = .url
+    item.sourceURL = record.url
+    item.checksum = record.checksum
+    items.append(item)
+
+    eventTasks[id] = Task { [weak self] in
+      defer { self?.eventTasks[id] = nil }
+      for await event in await session.events { self?.apply(event, to: id) }
+    }
+    Task { await session.start(initiallyPaused: initiallyPaused) }
+  }
+
+  private func apply(_ event: URLDownloadEvent, to id: String) {
+    guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+    switch event {
+    case .state(let state):
+      let shown: TorrentState =
+        switch state {
+        case .stopped: .stopped
+        case .downloading: .downloading
+        case .paused: .paused
+        case .verifying: .checking
+        case .completed: .completed
+        case .failed(let message): .failed(message)
+        }
+      items[index].state = shown
+      if shown != .downloading { items[index].speed = "" }
+      switch state {
+      case .failed(let message):
+        items[index].error = message
+        Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
+      case .completed:
+        items[index].error = nil
+        finalizeURLDownload(itemID: id)
+      default: break
+      }
+    case .stats(let stats):
+      // Bytes arriving again clears a "retrying" note.
+      if stats.receivedBytes > items[index].receivedBytes, items[index].state == .downloading {
+        items[index].error = nil
+      }
+      items[index].receivedBytes = stats.receivedBytes
+      items[index].totalBytes = stats.totalBytes
+      items[index].progress = stats.progress
+      items[index].connections = stats.connections
+      items[index].resumable = stats.resumable
+      items[index].speed =
+        items[index].state == .downloading ? Self.formatSpeed(stats.downloadSpeed) : ""
+    case .file(let url):
+      items[index].location = url
+      items[index].title = url.lastPathComponent
+    case .verified(let checksum):
+      items[index].verifiedChecksum = checksum
+    case .error(let message):
+      items[index].error = "Retrying: \(message)"
+    }
+  }
+
+  /// Move a finished URL download from `Downloading` into `Downloads`
+  /// (numbering the name if it is taken) and forget its record.
+  private func finalizeURLDownload(itemID: String) {
+    guard let index = items.firstIndex(where: { $0.id == itemID }),
+      let from = items[index].location
+    else { return }
+    if from.deletingLastPathComponent().standardizedFileURL
+      == Self.activeDirectory.standardizedFileURL
+    {
+      let name = URLDownloadSession.uniqueName(from.lastPathComponent) {
+        FileManager.default.fileExists(atPath: Self.downloadsRoot.appendingPathComponent($0).path)
+      }
+      let to = Self.downloadsRoot.appendingPathComponent(name)
+      do {
+        try FileManager.default.moveItem(at: from, to: to)
+        items[index].location = to
+        items[index].title = name
+      } catch {
+        items[index].error = "Couldn't move \(from.lastPathComponent) to Downloads: \(error.localizedDescription)"
+        return
+      }
+    }
+    Self.removeURLRecord(id: itemID)
+    removePausedMarker(id: itemID)
+    Self.removeActiveDirectoryIfEmpty()
+    Self.log.info("Moved \(self.items[index].title, privacy: .public) to Downloads")
+  }
+
+  private static func removeURLRecord(id: String) {
+    try? FileManager.default.removeItem(at: urlRecordURL(id: id))
   }
 
   // MARK: - Priorities
@@ -481,7 +718,8 @@ import os
   /// resumes the download instead.
   private func persistPausedMarker(id: String) {
     try? FileManager.default.createDirectory(
-      at: Self.torrentsDirectory, withIntermediateDirectories: true)
+      at: Self.pausedMarkerURL(id: id).deletingLastPathComponent(),
+      withIntermediateDirectories: true)
     try? Data("paused".utf8).write(to: Self.pausedMarkerURL(id: id), options: .atomic)
   }
 

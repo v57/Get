@@ -4,10 +4,12 @@ import UniformTypeIdentifiers
 
 /// The main window: downloads in the sidebar, details for the selected one
 /// in the detail pane. Torrent details show the file list with per-file
-/// progress, plus a priority mode that assigns download order 1–4.
+/// progress, plus a priority mode that assigns download order 1–4; URL
+/// downloads show their progress, source and checksum.
 struct TorrentView: View {
   @State private var store = DownloadStore()
   @State private var showImporter = false
+  @State private var showURLSheet = false
   @State private var selectedID: String?
   @State private var isDropTargeted = false
 
@@ -16,7 +18,10 @@ struct TorrentView: View {
       sidebar.navigationSplitViewColumnWidth(min: 200, ideal: 240).tint(.red)
     } detail: {
       if let id = selectedID, let item = store.items.first(where: { $0.id == id }) {
-        TorrentDetailView(store: store, itemID: item.id)
+        switch item.kind {
+        case .torrent: TorrentDetailView(store: store, itemID: item.id)
+        case .url: URLDownloadDetailView(store: store, itemID: item.id)
+        }
       } else if !store.items.isEmpty {
         ContentUnavailableView(
           "Select a Download", systemImage: "arrow.down.circle",
@@ -30,7 +35,7 @@ struct TorrentView: View {
               .regularMaterial, in: RoundedRectangle(cornerRadius: 8))
           }.allowsHitTesting(false)
       }
-    }.onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+    }.onDrop(of: [.fileURL, .url], isTargeted: $isDropTargeted) { providers in
       handleDrop(providers)
       return true
     }.onAppear {
@@ -45,6 +50,17 @@ struct TorrentView: View {
           Image(systemName: "plus")
         }.help("Open a .torrent file")
       }
+      ToolbarItem(placement: .primaryAction) {
+        Button {
+          showURLSheet = true
+        } label: {
+          Image(systemName: "link")
+        }.help("Download a link")
+      }
+    }.sheet(isPresented: $showURLSheet) {
+      URLDownloadSheet { url, checksum in
+        Task { await store.download(from: url, checksum: checksum) }
+      }
     }.fileImporter(
       isPresented: $showImporter,
       allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data]
@@ -52,7 +68,7 @@ struct TorrentView: View {
       guard case .success(let url) = result else { return }
       Task { await store.open(url: url) }
     }.alert(
-      "Couldn't Open Torrent",
+      "Couldn't Start Download",
       isPresented: Binding(
         get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })
     ) {
@@ -62,8 +78,9 @@ struct TorrentView: View {
     }
   }
 
-  /// Open every dropped file that is a `.torrent`. Non-torrent files are
-  /// reported as an error so the drop isn't silently ignored.
+  /// Open every dropped `.torrent` file and download every dropped link.
+  /// Other files are reported as an error so the drop isn't silently
+  /// ignored.
   private func handleDrop(_ providers: [NSItemProvider]) {
     for provider in providers {
       // loadObject (not loadItem — deprecated in the macOS 27 SDK);
@@ -71,6 +88,10 @@ struct TorrentView: View {
       _ = provider.loadObject(ofClass: URL.self) { url, _ in
         guard let url else { return }
         Task { @MainActor in
+          if !url.isFileURL {
+            await store.download(from: url)
+            return
+          }
           guard url.pathExtension.lowercased() == "torrent" else {
             store.lastError = "Not a .torrent file: \(url.lastPathComponent)"
             return
@@ -88,14 +109,15 @@ struct TorrentView: View {
         SidebarRow(
           item: item, onTogglePause: { store.togglePause(itemID: item.id) },
           onTrash: { Task { await store.trash(itemID: item.id) } },
-          onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) }
+          onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) },
+          onRetry: { store.retry(itemID: item.id) }
         ).tag(item.id)
       }
     }.navigationTitle("Downloads").overlay {
       if store.items.isEmpty {
         ContentUnavailableView(
           "No Downloads", systemImage: "arrow.down.circle",
-          description: Text("Click + to open a .torrent file."))
+          description: Text("Open a .torrent file, or download a link."))
       }
     }
   }
@@ -108,11 +130,17 @@ private struct SidebarRow: View {
   let onTrash: () -> Void
   let onOpen: () -> Void
   let onReveal: () -> Void
+  let onRetry: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       HStack(spacing: 4) {
         Text(item.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+        if case .failed = item.state, item.kind == .url {
+          Button(action: onRetry) {
+            Image(systemName: "arrow.clockwise")
+          }.buttonStyle(.borderless).help("Retry")
+        }
         if item.state == .downloading || item.state == .paused {
           Button(action: onTogglePause) {
             Image(systemName: item.state == .paused ? "play.fill" : "pause.fill")

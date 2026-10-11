@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		263FBE523031C505008DB220 /* Torrent in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE513031C505008DB220 /* Torrent */; };
+		263FBE543031C505008DB220 /* URLDownload in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE533031C505008DB220 /* URLDownload */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				263FBE523031C505008DB220 /* Torrent in Frameworks */,
+				263FBE543031C505008DB220 /* URLDownload in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 			name = Get;
 			packageProductDependencies = (
 				263FBE513031C505008DB220 /* Torrent */,
+				263FBE533031C505008DB220 /* URLDownload */,
 			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* Get.app */;
@@ -368,6 +371,10 @@
 		263FBE513031C505008DB220 /* Torrent */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = Torrent;
+		};
+		263FBE533031C505008DB220 /* URLDownload */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = URLDownload;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

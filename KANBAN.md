@@ -21,10 +21,10 @@ BOARD / COMMAND REFERENCE
   specifier sweep does not rewrite them.
 
 WORKING CONTRACT / LOCAL TEST LOOP
-  - Repo: /Users/v57/Projects/Get (single git repo, origin = github.com/v57/Get.git)
+  - Repo: ~/Developer/v57/Get (single git repo, origin = github.com/v57/Get.git)
   - Engine is a SwiftPM package: Swift Package targets under Sources/Torrent.
   - Hermetic test suite (skip the 4 network suites):
-      cd /Users/v57/Projects/Get && \
+      cd ~/Developer/v57/Get && \
       swift test --skip HTTPTrackerTests --skip UDPTrackerTests \
                  --skip SessionIntegrationTests --skip PeerConnectionTests
     (currently 141 tests passing; baseline at faf135e)

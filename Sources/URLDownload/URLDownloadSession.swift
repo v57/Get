@@ -78,6 +78,9 @@ public actor URLDownloadSession {
   private var generation = 0
   private var workers: [Task<Void, Never>] = []
   private var activeWorkers = 0
+  /// Segments a worker is fetching right now. An unfinished segment outside
+  /// this set (its worker retired) is picked up by the next free worker.
+  private var owned: Set<Int> = []
   private var statsTask: Task<Void, Never>?
   private var ticks = 0
 
@@ -91,7 +94,7 @@ public actor URLDownloadSession {
   public init(
     record: URLDownloadRecord, saveDirectory: URL, recordURL: URL?, maxConnections: Int = 4,
     minSegmentSize: Int64 = 1 << 20, configuration: URLSessionConfiguration = .default,
-    retryDelay: Duration = .seconds(1), maxRetries: Int = 6
+    retryDelay: Duration = .seconds(1), maxRetries: Int = 10
   ) {
     self.record = record
     self.saveDirectory = saveDirectory
@@ -178,6 +181,7 @@ public actor URLDownloadSession {
     for worker in workers { worker.cancel() }
     workers.removeAll()
     activeWorkers = 0
+    owned.removeAll()
     speedMeter.reset()
     stats.downloadSpeed = 0
     stats.connections = 0
@@ -196,12 +200,16 @@ public actor URLDownloadSession {
       Task { await self.finishIfDone() }
       return
     }
-    // Without ranges only one stream can run.
-    for index in record.acceptsRanges ? pending : [pending[0]] { spawnWorker(index) }
+    // Without ranges only one stream can run. With them, at most
+    // `maxConnections`; the other segments go to whichever frees up first.
+    for index in (record.acceptsRanges ? pending : [pending[0]]).prefix(maxConnections) {
+      spawnWorker(index)
+    }
   }
 
   private func spawnWorker(_ segment: Int) {
     let gen = generation
+    owned.insert(segment)
     activeWorkers += 1
     stats.connections = activeWorkers
     workers.append(Task { await self.runWorker(segment: segment, generation: gen) })
@@ -229,6 +237,9 @@ public actor URLDownloadSession {
     case restart
     /// Not worth retrying (404, disk full…).
     case permanent(String)
+    /// The server wants fewer requests (429, 503), maybe saying how long to
+    /// wait.
+    case busy(String, retryAfter: Duration?)
     /// The response ended before the segment did.
     case truncated
   }
@@ -236,11 +247,13 @@ public actor URLDownloadSession {
   private func runWorker(segment initial: Int, generation gen: Int) async {
     var index = initial
     var failures = 0
-    defer { workerEnded(generation: gen) }
+    defer { workerEnded(segment: index, generation: gen) }
     while gen == generation, !Task.isCancelled {
       if record.segments[index].isDone {
-        guard let stolen = splitLargestSegment() else { return }
-        index = stolen
+        guard let next = nextSegment() else { return }
+        owned.remove(index)
+        owned.insert(next)
+        index = next
         failures = 0
         continue
       }
@@ -270,6 +283,22 @@ public actor URLDownloadSession {
         guard gen == generation else { return }
         fail(message)
         return
+      } catch WorkerError.busy(let message, let retryAfter) {
+        guard gen == generation else { return }
+        if activeWorkers > 1 {
+          // Too many connections for this server: this one steps back and
+          // its segment goes to whichever connection frees up first.
+          Self.log.info("server busy (\(message, privacy: .public)); dropping a connection")
+          return
+        }
+        failures += 1
+        guard failures <= maxRetries else {
+          fail(message)
+          return
+        }
+        emit(.error(message))
+        let backoff = retryDelay * (1 << min(failures - 1, 5))
+        try? await Task.sleep(for: min(max(backoff, retryAfter ?? .zero), .seconds(120)))
       } catch {
         guard gen == generation, !Task.isCancelled else { return }
         if (error as? URLError)?.code == .cancelled { return }
@@ -289,8 +318,9 @@ public actor URLDownloadSession {
     }
   }
 
-  private func workerEnded(generation gen: Int) {
+  private func workerEnded(segment: Int, generation gen: Int) {
     guard gen == generation else { return }
+    owned.remove(segment)
     activeWorkers -= 1
     stats.connections = activeWorkers
     if activeWorkers == 0 { Task { await self.finishIfDone() } }
@@ -352,7 +382,9 @@ public actor URLDownloadSession {
       record.segments[index].end = record.totalBytes
     case 416:
       throw WorkerError.restart
-    case 408, 429, 500...599:
+    case 429, 503:
+      throw WorkerError.busy(Self.status(response), retryAfter: Self.retryAfter(response))
+    case 408, 500...599:
       throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: Self.status(response)])
     default:
       throw WorkerError.permanent(Self.status(response))
@@ -413,11 +445,16 @@ public actor URLDownloadSession {
     for part in 1..<count { spawnWorker(part) }
   }
 
-  /// A connection finished its segment: give it the second half of the
-  /// segment with the most left, if that is worth a new request. Returns
-  /// the new segment's index.
-  private func splitLargestSegment() -> Int? {
+  /// A connection finished its segment: give it an unfinished segment no one
+  /// is fetching, or else the second half of the running segment with the
+  /// most left, if that is worth a new request. Returns the segment's index.
+  private func nextSegment() -> Int? {
     guard record.acceptsRanges else { return nil }
+    if let orphan = record.segments.indices.first(where: {
+      !owned.contains($0) && !record.segments[$0].isDone
+    }) {
+      return orphan
+    }
     let candidates = record.segments.indices.compactMap { index in
       record.segments[index].remaining.map { (index: index, remaining: $0) }
     }
@@ -436,8 +473,9 @@ public actor URLDownloadSession {
   private func finishIfDone() async {
     guard state == .downloading, activeWorkers == 0 else { return }
     guard !record.segments.isEmpty, record.segments.allSatisfy(\.isDone) else {
-      // Every worker stopped without finishing (they only do that on
-      // failure, which already set the state).
+      // Every worker stopped with segments left (connections retired while
+      // the last one was finishing): start them again.
+      launchWorkers()
       return
     }
     statsTask?.cancel()
@@ -549,6 +587,11 @@ public actor URLDownloadSession {
       let start = Int64(parts[0][..<dash].trimmingCharacters(in: .whitespaces))
     else { return nil }
     return (start, Int64(parts[1].trimmingCharacters(in: .whitespaces)))
+  }
+
+  /// `Retry-After` in seconds (the HTTP-date form is ignored).
+  static func retryAfter(_ response: HTTPURLResponse) -> Duration? {
+    response.value(forHTTPHeaderField: "Retry-After").flatMap { Int($0) }.map { .seconds($0) }
   }
 
   /// A validator usable in `If-Range`: a strong ETag, else Last-Modified.

@@ -16,6 +16,9 @@ final class MockHTTP: URLProtocol, @unchecked Sendable {
     /// the connection.
     var failAfter: Int?
     var failures = 0
+    /// The next `busy` requests for a range past byte 0 get `429 Too Many
+    /// Requests`, like a server limiting connections per client.
+    var busy = 0
   }
 
   private static let lock = NSLock()
@@ -49,18 +52,25 @@ final class MockHTTP: URLProtocol, @unchecked Sendable {
 
   override func startLoading() {
     let path = String(request.url!.path.dropFirst())
-    let (resource, failAfter): (Resource?, Int?) = Self.lock.withLock {
+    let rangeHeader = request.value(forHTTPHeaderField: "Range")
+    let (resource, failAfter, busy): (Resource?, Int?, Bool) = Self.lock.withLock {
       Self.log.append(request)
-      guard var resource = Self.resources[path] else { return (nil, nil) }
+      guard var resource = Self.resources[path] else { return (nil, nil, false) }
+      if resource.busy > 0, let rangeHeader, !rangeHeader.hasPrefix("bytes=0-") {
+        resource.busy -= 1
+        Self.resources[path] = resource
+        return (resource, nil, true)
+      }
       var failAfter: Int?
       if resource.failures > 0 {
         resource.failures -= 1
         failAfter = resource.failAfter
         Self.resources[path] = resource
       }
-      return (resource, failAfter)
+      return (resource, failAfter, false)
     }
     guard let resource else { return respond(status: 404, headers: [:], body: Data()) }
+    if busy { return respond(status: 429, headers: ["Retry-After": "0"], body: Data()) }
     if let status = resource.status { return respond(status: status, headers: [:], body: Data()) }
 
     let total = resource.data.count

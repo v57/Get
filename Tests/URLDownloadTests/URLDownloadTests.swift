@@ -197,6 +197,20 @@ private func rangeHeaders(_ path: String) -> [String] {
   #expect(try Data(contentsOf: dir.appendingPathComponent("file.bin")) == data)
 }
 
+@Test func dropsConnectionsTheServerRefuses() async throws {
+  let dir = try makeTempDir()
+  defer { try? FileManager.default.removeItem(at: dir) }
+  let data = randomData(1_000_000)
+  // Only one connection allowed: the three extra segment requests get 429.
+  let url = MockHTTP.serve(.init(data: data, busy: 3), at: "busy/file.bin")
+
+  let result = await run(makeSession(.init(url: url), dir: dir))
+
+  #expect(result.finalState == .completed)
+  #expect(try Data(contentsOf: dir.appendingPathComponent("file.bin")) == data)
+  #expect(!result.states.contains { if case .failed = $0 { true } else { false } })
+}
+
 @Test func failsOnNotFound() async throws {
   let dir = try makeTempDir()
   defer { try? FileManager.default.removeItem(at: dir) }

@@ -49,6 +49,7 @@ final class FakeTracker: @unchecked Sendable {
     peers: Data = Data(), peers6: Data = Data(), interval: Int = 1800, failureReason: String? = nil,
     seeders: Int? = nil, leechers: Int? = nil, rawBody: Data? = nil
   ) throws {
+    _ = SocketSignalSetup.installed
     self.peersData = peers
     self.peers6Data = peers6
     self.interval = interval

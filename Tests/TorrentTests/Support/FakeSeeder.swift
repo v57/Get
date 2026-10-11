@@ -60,6 +60,7 @@ final class FakeSeeder: @unchecked Sendable {
     content: Data, pieceLength: Int, infoHash: [UInt8], peerID: [UInt8], mode: Mode = .encrypted,
     serveDelay: Duration = .zero, port: UInt16 = 0
   ) throws {
+    _ = SocketSignalSetup.installed
     self.content = content
     self.pieceLength = pieceLength
     self.infoHash = infoHash

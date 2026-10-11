@@ -120,6 +120,7 @@ final class FakeWirePeer: @unchecked Sendable {
     infoHash: [UInt8], peerID: [UInt8], pieceCount: Int = 4, pieceLength: Int = 16_384,
     mode: Mode = .encrypted, oversizedFrame: Bool = false
   ) throws {
+    _ = SocketSignalSetup.installed
     self.infoHash = infoHash
     self.peerID = peerID
     self.pieceCount = pieceCount

@@ -4,14 +4,6 @@ import Testing
 
 @testable import Torrent
 
-// The fake seeder writes over raw POSIX sockets; when a session cancels while
-// the seeder is mid-write, the kernel raises SIGPIPE, which by default kills
-// the whole test process (a write to a closed socket). Ignoring SIGPIPE turns
-// that into EPIPE, which the fake seeder handles as a normal client
-// disconnect and exits its connection handler cleanly. Touched at the start
-// of the session-level test (static lets are lazy).
-private enum SocketSignalSetup { static let installed: Void = { signal(SIGPIPE, SIG_IGN) }() }
-
 // MARK: - Helpers
 
 /// Deterministic content stream (same pattern as SessionIntegrationTests).

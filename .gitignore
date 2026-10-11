@@ -9,3 +9,5 @@ DerivedData/
 .hermes/
 *.torrent
 build/
+CLAUDE.md
+/.claude

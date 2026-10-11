@@ -195,6 +195,9 @@ public actor TorrentSession {
   private var disk: DiskWriter
   /// Piece → file index, computed once from the layout.
   private let pieceFile: [Int]
+  /// File index → position in natural name order (`naturalFileOrder`), the
+  /// order files are downloaded in after priorities.
+  private let filePosition: [Int]
   /// File index → download priority (1...4). Unprioritized files are
   /// fetched after every prioritized one.
   private var filePriorities: [Int: Int] = [:]
@@ -275,11 +278,9 @@ public actor TorrentSession {
       pieceFile.append(layout.fileIndex(ofByteOffset: offset))
     }
     self.pieceFile = pieceFile
-    // Make the picker file-aware so a download finishes the current file
-    // before fetching a later file's pieces (each file downloads sequentially
-    // from its start). Single-file torrents set a single-file mapping; the
-    // picker treats every piece as file 0, i.e. no cross-file restriction.
-    self.picker.setFiles(pieceFile)
+    var filePosition = [Int](repeating: 0, count: torrent.files.count)
+    for (position, file) in torrent.naturalFileOrder.enumerated() { filePosition[file] = position }
+    self.filePosition = filePosition
 
     self.stats = TorrentStats(
       totalBytes: torrent.totalSize,
@@ -287,12 +288,18 @@ public actor TorrentSession {
     self.dht = settings.useDHT ? (try? DHTNode()) : nil
     // The inbound acceptor is created in start() (its closure captures
     // self, which is not safe during init).
-    // Apply any priorities set before start(): the default order is
-    // ascending; priorities reorder it. With no paused/removed files every
-    // piece maps to the first file it overlaps (== its start-byte file).
-    self.picker.setOrder(
-      Self.priorityOrder(
-        pieceCount: pieceCount, verified: [], priorities: [:], fetchFile: pieceFile))
+    // Files download in natural name order until priorities, paused or
+    // removed files (from resume state or the user) rebuild the order.
+    let fetch = Self.fetchOrder(
+      pieceCount: pieceCount, pieceLength: Int64(torrent.pieceLength),
+      totalSize: torrent.totalSize, fileEnds: layout.fileEnds, filePosition: filePosition,
+      priorities: [:], skipped: [], verified: [])
+    self.picker.setOrder(fetch.order)
+    // Make the picker file-aware so a download finishes the current file
+    // before fetching a later file's pieces (each file downloads sequentially
+    // from its start). Single-file torrents map every piece to file 0, i.e.
+    // no cross-file restriction.
+    self.picker.setFiles(fetch.pieceFile)
   }
 
   public static func parse(url: URL) throws -> TorrentFile { try TorrentFile.parse(url: url) }
@@ -512,66 +519,25 @@ public actor TorrentSession {
   }
 
   /// Rebuild the picker's fetch order from the current priorities and
-  /// paused/removed files: unverified pieces sorted by (file priority, piece
-  /// index), with unprioritized files (rank 5) after all prioritized ones;
-  /// pieces whose overlapping files are ALL paused/removed are excluded.
-  private func rebuildOrder() {
-    picker.setOrder(
-      Self.priorityOrder(
-        pieceCount: picker.pieceCount, verified: verifiedPieces, priorities: filePriorities,
-        fetchFile: computeFetchFile()))
-  }
-
-  /// Compute the order's fetchable-file attribution: for each piece, the first
-  /// file it overlaps that is NOT paused/removed (or -1 if every overlapping
-  /// file is paused/removed, i.e. the piece is not fetchable).
+  /// paused/removed files (see `fetchOrder`): verified pieces and pieces only
+  /// paused/removed files need are left out. The picker's piece → file map
+  /// follows the same attribution, so its "finish the current file first"
+  /// preference matches the order.
   ///
-  /// This is the fix for "pausing the first files starves the last file's
-  /// start": a piece can straddle a paused file and an active one (e.g. the
-  /// active file begins mid-piece inside a paused file's last piece). That
-  /// piece must still be fetched so the ACTIVE file's leading bytes download
-  /// and its sequential head grows — excluding it on the start-byte ownership
-  /// of the paused file leaves the active file truncated with a 0 head. The
-  /// piece's bytes in the paused file are written too (a paused file is not
-  /// removed, so DiskWriter does not skip it), which is a negligible
-  /// side-effect of downloading the shared boundary piece.
-  private func computeFetchFile() -> [Int] {
-    var fetch = [Int](repeating: -1, count: picker.pieceCount)
-    for piece in 0..<picker.pieceCount {
-      let start = Int64(piece) * Int64(torrent.pieceLength)
-      let end = min(start + Int64(torrent.pieceLength), torrent.totalSize)
-      for file in 0..<layout.entries.count {
-        let fileStart = file == 0 ? 0 : layout.fileEnds[file - 1]
-        let fileEnd = layout.fileEnds[file]
-        if end > fileStart, start < fileEnd, !pausedFiles.contains(file),
-          !removedFiles.contains(file)
-        {
-          fetch[piece] = file
-          break
-        }
-      }
-    }
-    return fetch
-  }
-
-  /// Compute the fetch order: unverified pieces sorted by (file priority,
-  /// piece index), unprioritized files (rank 5) after all prioritized ones,
-  /// pieces with no fetchable file (`fetchFile[piece] == -1`) excluded. Pure —
-  /// usable from `init` before the actor is fully initialized.
-  private static func priorityOrder(
-    pieceCount: Int, verified: Set<Int>, priorities: [Int: Int], fetchFile: [Int]
-  ) -> [Int] {
-    func rank(of piece: Int) -> Int {
-      let file = fetchFile[piece]
-      return priorities[file] ?? 0 > 0 ? priorities[file]! : 5
-    }
-    let unverified = (0..<pieceCount).filter { !verified.contains($0) }
-    return unverified.filter { fetchFile[$0] >= 0 }.sorted { a, b in
-      let ra = rank(of: a)
-      let rb = rank(of: b)
-      if ra != rb { return ra < rb }
-      return a < b
-    }
+  /// A piece can straddle a paused file and an active one (e.g. the active
+  /// file begins mid-piece inside a paused file's last piece). That piece is
+  /// still fetched, for the active file, so the active file's leading bytes
+  /// download and its sequential head grows. The piece's bytes in the paused
+  /// file are written too (a paused file is not removed, so DiskWriter does
+  /// not skip it), a negligible side-effect of the shared boundary piece.
+  private func rebuildOrder() {
+    let fetch = Self.fetchOrder(
+      pieceCount: picker.pieceCount, pieceLength: Int64(torrent.pieceLength),
+      totalSize: torrent.totalSize, fileEnds: layout.fileEnds, filePosition: filePosition,
+      priorities: filePriorities, skipped: pausedFiles.union(removedFiles),
+      verified: verifiedPieces)
+    picker.setOrder(fetch.order)
+    picker.setFiles(fetch.pieceFile)
   }
 
   // MARK: - File removal

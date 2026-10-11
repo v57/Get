@@ -51,8 +51,14 @@ import os
     var trackerSeeders: Int?
     var trackerLeechers: Int?
     var error: String?
-    /// The torrent's files (empty for non-torrent downloads).
+    /// The torrent's files in torrent order, indexed by file index (empty
+    /// for non-torrent downloads).
     var files: [DownloadFileItem] = []
+    /// File indices in natural name order: the order files are shown and
+    /// downloaded in.
+    var fileOrder: [Int] = []
+    /// `files` in display order.
+    var orderedFiles: [DownloadFileItem] { fileOrder.map { files[$0] } }
     /// Set when the download finishes and its files are moved out of
     /// `Downloading` into `Downloads` — the location Trash should use.
     var finalURL: URL?
@@ -178,8 +184,9 @@ import os
       }
     }
     items.append(
-      DownloadItem(id: id, title: torrent.name, state: initiallyPaused ? .paused : .stopped,
-        files: files))
+      DownloadItem(
+        id: id, title: torrent.name, state: initiallyPaused ? .paused : .stopped, files: files,
+        fileOrder: torrent.naturalFileOrder))
 
     let task = Task { [weak self] in
       defer { self?.eventTasks[id] = nil }
@@ -353,7 +360,7 @@ import os
   // MARK: - Download-only scope
 
   /// Restrict the download to a chosen file — and, when `andAfter` is true,
-  /// every file after it — by pausing and trashing every other file that is
+  /// every file after it in display order — by pausing and trashing every other file that is
   /// not already fully downloaded. Fully downloaded files are left in place
   /// (their data is already on disk); files inside the kept range are
   /// unpaused (or restored, if previously removed) so the download proceeds.
@@ -378,23 +385,23 @@ import os
       }
     }
 
+    // The kept files: the chosen one, plus (for "only this and after") every
+    // file after it in display order.
+    let order = items[index].fileOrder
+    let kept: [Int] =
+      andAfter ? Array(order.drop(while: { $0 != fileIndex })) : [fileIndex]
+    let keptSet = Set(kept)
+
     for (i, file) in files.enumerated() {
-      // The chosen file, and (for "only this and after") every later file,
-      // is kept.
-      if i == fileIndex { continue }
-      if andAfter, i >= fileIndex { continue }
+      if keptSet.contains(i) { continue }
       // A fully downloaded file stays — it's already on disk.
       if isComplete(file) { continue }
       // Pause + trash everything else that isn't finished.
       removeFile(fileIndex: i, itemID: itemID)
     }
 
-    // Activate the kept range so the download actually proceeds.
-    if andAfter {
-      for i in fileIndex..<items[index].files.count { keepActive(i) }
-    } else {
-      keepActive(fileIndex)
-    }
+    // Activate the kept files so the download actually proceeds.
+    for i in kept { keepActive(i) }
   }
 
   // MARK: - Persistence (resume on relaunch)

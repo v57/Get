@@ -147,7 +147,7 @@ private struct TorrentDetailView: View {
   var body: some View {
     List {
       Section {
-        ForEach(item.files) { file in
+        ForEach(item.orderedFiles) { file in
           FileRow(
             file: file, priorityMode: priorityMode,
             onTogglePause: { store.toggleFilePaused(fileIndex: file.index, itemID: itemID) },

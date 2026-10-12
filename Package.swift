@@ -6,21 +6,22 @@ import PackageDescription
 let package = Package(
   name: "Get", platforms: [.macOS(.v13)],
   products: [
+    .library(name: "GetKit", targets: ["GetKit"]),
     .library(name: "Torrent", targets: ["Torrent"]),
     .library(name: "URLDownload", targets: ["URLDownload"]),
   ],
   targets: [
     .target(
-      name: "DownloadCore",
+      name: "GetKit",
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .target(
-      name: "Torrent", dependencies: ["DownloadCore"],
+      name: "Torrent", dependencies: ["GetKit"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .target(
-      name: "URLDownload", dependencies: ["DownloadCore"],
+      name: "URLDownload", dependencies: ["GetKit"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .testTarget(
-      name: "DownloadCoreTests", dependencies: ["DownloadCore"],
+      name: "GetKitTests", dependencies: ["GetKit"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .testTarget(
       name: "TorrentTests", dependencies: ["Torrent"],

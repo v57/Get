@@ -1,5 +1,5 @@
 import CryptoKit
-import DownloadCore
+import GetKit
 import Foundation
 import os
 

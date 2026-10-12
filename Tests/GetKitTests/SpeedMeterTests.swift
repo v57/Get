@@ -1,6 +1,6 @@
 import Testing
 
-@testable import DownloadCore
+@testable import GetKit
 
 @Test func speedMeterFirstSampleIsZero() {
   var meter = SpeedMeter()

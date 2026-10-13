@@ -1,11 +1,21 @@
 import AppKit
 import SwiftUI
+import UpdateKit
 import os
 
 @main struct GetApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-  var body: some Scene { WindowGroup { TorrentView() } }
+  /// Updates from GitHub Releases (Get.zip, built by Scripts/release.sh): checked daily
+  /// once the user turns on automatic checks (never before), installed in place with a relaunch.
+  private let updater = AppUpdater(github: "v57/Get", assetName: "Get.zip")
+
+  init() { updater.start() }
+
+  var body: some Scene {
+    WindowGroup { TorrentView() }
+      .commands { UpdaterCommands(updater: updater) }
+  }
 }
 
 /// Receives "Open With…" events (LaunchServices) for .torrent files and

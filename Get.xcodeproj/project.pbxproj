@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		263FBE523031C505008DB220 /* Torrent in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE513031C505008DB220 /* Torrent */; };
 		263FBE543031C505008DB220 /* URLDownload in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE533031C505008DB220 /* URLDownload */; };
+		D5C0DE000000000000000003 /* UpdateKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000002 /* UpdateKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +30,7 @@
 			files = (
 				263FBE523031C505008DB220 /* Torrent in Frameworks */,
 				263FBE543031C505008DB220 /* URLDownload in Frameworks */,
+				D5C0DE000000000000000003 /* UpdateKit in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -70,6 +72,7 @@
 			packageProductDependencies = (
 				263FBE513031C505008DB220 /* Torrent */,
 				263FBE533031C505008DB220 /* URLDownload */,
+				D5C0DE000000000000000002 /* UpdateKit */,
 			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* Get.app */;
@@ -101,6 +104,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				263FBE403031C505008DB220 /* XCLocalSwiftPackageReference "." */,
+				D5C0DE000000000000000001 /* XCLocalSwiftPackageReference "../UpdateKit" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
@@ -367,6 +371,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = .;
 		};
+		D5C0DE000000000000000001 /* XCLocalSwiftPackageReference "../UpdateKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../UpdateKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -377,6 +385,10 @@
 		263FBE533031C505008DB220 /* URLDownload */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = URLDownload;
+		};
+		D5C0DE000000000000000002 /* UpdateKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = UpdateKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

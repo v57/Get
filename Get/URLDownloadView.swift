@@ -138,6 +138,11 @@ struct URLDownloadSheet: View {
         }.disabled(url == nil || checksumInvalid)
       }
     }.onAppear {
+      // The screenshot demo shows a link of its own, never the clipboard.
+      if ScreenshotDemo.isOn {
+        link = "https://downloads.example.com/fonts/Atkinson-Hyperlegible.zip"
+        return
+      }
       if link.isEmpty, let text = NSPasteboard.general.string(forType: .string),
         Self.parse(text) != nil
       {

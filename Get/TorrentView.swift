@@ -42,6 +42,10 @@ struct TorrentView: View {
       // Hand the live store to the app delegate so "Open With…" events
       // reach it (and any queued from a cold start are drained).
       AppDelegate.attach(store: store)
+      if ScreenshotDemo.isOn {
+        selectedID = ScreenshotDemo.value("--select").flatMap { title in store.items.first { $0.title == title }?.id }
+        showURLSheet = ScreenshotDemo.flag("--add-url")
+      }
     }.toolbar {
       ToolbarItem(placement: .primaryAction) {
         Button {

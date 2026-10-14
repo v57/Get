@@ -137,6 +137,11 @@ import os
   private static func isURLDownload(_ id: String) -> Bool { id.hasPrefix("url-") }
 
   init() {
+    // The screenshot demo shows made-up downloads and never restores the user's.
+    if ScreenshotDemo.isOn {
+      items = ScreenshotDemo.items
+      return
+    }
     // Reopen every torrent that was active in a previous run. Sessions
     // pick up the persisted resume state automatically (verified pieces
     // are skipped), so interrupted downloads continue on relaunch.

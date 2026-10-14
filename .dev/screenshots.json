@@ -1,0 +1,32 @@
+{
+  "build": { "scheme": "Get", "project": "Get.xcodeproj" },
+  "appearances": ["light", "dark"],
+  "watch": ["Get", "Sources"],
+  "mac": { "window": [1440, 900] },
+  "scenes": [
+    {
+      "id": "01-downloads",
+      "arguments": ["--screenshot-demo", "--select", "ubuntu-26.04-desktop-amd64.iso"],
+      "delay": 2,
+      "caption": "Torrents and links in one place"
+    },
+    {
+      "id": "02-files",
+      "arguments": ["--screenshot-demo", "--select", "Open Photo Archive 2026"],
+      "delay": 2,
+      "caption": "Pick the files you want first"
+    },
+    {
+      "id": "03-link",
+      "arguments": ["--screenshot-demo", "--select", "Atkinson-Hyperlegible.zip"],
+      "delay": 2,
+      "caption": "Fast, resumable downloads from any link"
+    },
+    {
+      "id": "04-add-url",
+      "arguments": ["--screenshot-demo", "--add-url"],
+      "delay": 2,
+      "caption": "Paste a link, add a checksum"
+    }
+  ]
+}

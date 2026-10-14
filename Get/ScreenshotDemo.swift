@@ -9,6 +9,9 @@ import Torrent
 ///   --screenshot-demo        the demo list
 ///   --select <title>         shows that download
 ///   --add-url                opens the Download from URL sheet
+///
+/// A capture by `dev-screenshots` takes every scene in one launch: `TorrentView` opens each next scene from its
+/// arguments through `DevScreenshots`.
 enum ScreenshotDemo {
   static let isOn: Bool = {
     #if DEBUG
@@ -18,13 +21,15 @@ enum ScreenshotDemo {
     #endif
   }()
 
-  static func value(_ option: String) -> String? {
-    let arguments = CommandLine.arguments
+  /// The argument after `option`, from the launch or from a later scene's arguments.
+  static func value(_ option: String, in arguments: [String] = CommandLine.arguments) -> String? {
     guard let index = arguments.firstIndex(of: option), index + 1 < arguments.count else { return nil }
     return arguments[index + 1]
   }
 
-  static func flag(_ option: String) -> Bool { isOn && CommandLine.arguments.contains(option) }
+  static func flag(_ option: String, in arguments: [String] = CommandLine.arguments) -> Bool {
+    isOn && arguments.contains(option)
+  }
 
   typealias Item = DownloadStore.DownloadItem
   typealias File = DownloadStore.DownloadFileItem

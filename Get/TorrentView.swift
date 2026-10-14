@@ -1,3 +1,4 @@
+import DevScreenshots
 import SwiftUI
 import Torrent
 import UniformTypeIdentifiers
@@ -12,6 +13,8 @@ struct TorrentView: View {
   @State private var showURLSheet = false
   @State private var selectedID: String?
   @State private var isDropTargeted = false
+  /// The Download from URL sheet is on screen (its open or close animation is over).
+  @State private var urlSheetIsUp = false
 
   var body: some View {
     NavigationSplitView {
@@ -42,10 +45,11 @@ struct TorrentView: View {
       // Hand the live store to the app delegate so "Open With…" events
       // reach it (and any queued from a cold start are drained).
       AppDelegate.attach(store: store)
-      if ScreenshotDemo.isOn {
-        selectedID = ScreenshotDemo.value("--select").flatMap { title in store.items.first { $0.title == title }?.id }
-        showURLSheet = ScreenshotDemo.flag("--add-url")
-      }
+    }.task {
+      // Screenshots (.dev/screenshots.json): every scene in one launch, each next one opened from its arguments.
+      Screenshots.prepare(waitsForReady: true) { scene in await openDemoScene(scene.arguments) }
+      await openDemoScene(CommandLine.arguments)
+      Screenshots.ready()
     }.toolbar {
       ToolbarItem(placement: .primaryAction) {
         Button {
@@ -64,7 +68,7 @@ struct TorrentView: View {
     }.sheet(isPresented: $showURLSheet) {
       URLDownloadSheet { url, checksum in
         Task { await store.download(from: url, checksum: checksum) }
-      }
+      }.onAppear { urlSheetIsUp = true }.onDisappear { urlSheetIsUp = false }
     }.fileImporter(
       isPresented: $showImporter,
       allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data]
@@ -80,6 +84,19 @@ struct TorrentView: View {
     } message: {
       Text(store.lastError ?? "")
     }
+  }
+
+  /// A screenshot scene of the demo list, from its arguments: `--select <title>` shows that download and `--add-url`
+  /// opens the Download from URL sheet. What the arguments don't mention is closed, so a scene never keeps the one
+  /// before's selection or sheet. Returns once the sheet has finished opening or closing.
+  private func openDemoScene(_ arguments: [String]) async {
+    guard ScreenshotDemo.isOn else { return }
+    selectedID = ScreenshotDemo.value("--select", in: arguments).flatMap { title in
+      store.items.first { $0.title == title }?.id
+    }
+    showURLSheet = ScreenshotDemo.flag("--add-url", in: arguments)
+    showImporter = false
+    for _ in 0..<60 where urlSheetIsUp != showURLSheet { try? await Task.sleep(for: .milliseconds(50)) }
   }
 
   /// Open every dropped `.torrent` file and download every dropped link.

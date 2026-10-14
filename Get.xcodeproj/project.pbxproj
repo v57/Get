@@ -10,6 +10,7 @@
 		263FBE523031C505008DB220 /* Torrent in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE513031C505008DB220 /* Torrent */; };
 		263FBE543031C505008DB220 /* URLDownload in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE533031C505008DB220 /* URLDownload */; };
 		D5C0DE000000000000000003 /* UpdateKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000002 /* UpdateKit */; };
+		D5C0DE000000000000000006 /* DevScreenshots in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000005 /* DevScreenshots */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +32,7 @@
 				263FBE523031C505008DB220 /* Torrent in Frameworks */,
 				263FBE543031C505008DB220 /* URLDownload in Frameworks */,
 				D5C0DE000000000000000003 /* UpdateKit in Frameworks */,
+				D5C0DE000000000000000006 /* DevScreenshots in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -73,6 +75,7 @@
 				263FBE513031C505008DB220 /* Torrent */,
 				263FBE533031C505008DB220 /* URLDownload */,
 				D5C0DE000000000000000002 /* UpdateKit */,
+				D5C0DE000000000000000005 /* DevScreenshots */,
 			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* Get.app */;
@@ -105,6 +108,7 @@
 			packageReferences = (
 				263FBE403031C505008DB220 /* XCLocalSwiftPackageReference "." */,
 				D5C0DE000000000000000001 /* XCRemoteSwiftPackageReference "UpdateKit" */,
+				D5C0DE000000000000000004 /* XCRemoteSwiftPackageReference "Dev" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
@@ -382,6 +386,14 @@
 				kind = branch;
 			};
 		};
+		D5C0DE000000000000000004 /* XCRemoteSwiftPackageReference "Dev" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/v57/Dev.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -396,6 +408,10 @@
 		D5C0DE000000000000000002 /* UpdateKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = UpdateKit;
+		};
+		D5C0DE000000000000000005 /* DevScreenshots */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DevScreenshots;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

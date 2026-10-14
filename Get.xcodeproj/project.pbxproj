@@ -104,7 +104,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				263FBE403031C505008DB220 /* XCLocalSwiftPackageReference "." */,
-				D5C0DE000000000000000001 /* XCLocalSwiftPackageReference "../UpdateKit" */,
+				D5C0DE000000000000000001 /* XCRemoteSwiftPackageReference "UpdateKit" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
@@ -371,11 +371,18 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = .;
 		};
-		D5C0DE000000000000000001 /* XCLocalSwiftPackageReference "../UpdateKit" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../UpdateKit;
-		};
 /* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D5C0DE000000000000000001 /* XCRemoteSwiftPackageReference "UpdateKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/v57/UpdateKit.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		263FBE513031C505008DB220 /* Torrent */ = {

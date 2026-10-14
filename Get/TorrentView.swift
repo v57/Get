@@ -135,6 +135,7 @@ private struct SidebarRow: View {
   let onOpen: () -> Void
   let onReveal: () -> Void
   let onRetry: () -> Void
+  @Environment(\.colorScheme) private var colorScheme
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
@@ -151,7 +152,8 @@ private struct SidebarRow: View {
           }.buttonStyle(.borderless).help(item.state == .paused ? "Resume" : "Pause")
         }
       }
-      ProgressView(value: item.progress).controlSize(.small)
+      // Made anew when the appearance changes: AppKit's bar loses the red tint otherwise and turns the accent color.
+      ProgressView(value: item.progress).controlSize(.small).id(colorScheme)
       HStack(spacing: 4) {
         Text(item.state.label)
         if !item.speed.isEmpty { Text("· \(item.speed)") }

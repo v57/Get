@@ -415,13 +415,18 @@ private struct TorrentDetailView: View {
       FileTrail(file: file, priorityMode: priorityMode)
     }
     .opacity(file.isRemoved ? 0.5 : 1)
-    .onTapGesture(count: 2) {
-      guard !priorityMode else { return }
-      store.openFile(fileIndex: file.index, itemID: itemID)
-    }.onTapGesture {
-      guard priorityMode else { return }
-      togglePriority(for: file)
-    }.contextMenu { fileMenu(file) }
+    // Alongside the row's own tap (which selects in a sidebar), not instead of it.
+    .simultaneousGesture(
+      TapGesture(count: 2).onEnded {
+        guard !priorityMode else { return }
+        store.openFile(fileIndex: file.index, itemID: itemID)
+      }
+    ).simultaneousGesture(
+      TapGesture().onEnded {
+        guard priorityMode else { return }
+        togglePriority(for: file)
+      }
+    ).contextMenu { fileMenu(file) }
   }
 
   @ViewBuilder private func fileMenu(_ file: DownloadStore.DownloadFileItem) -> some View {

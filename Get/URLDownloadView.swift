@@ -1,4 +1,3 @@
-import AppKit
 import ComponentKit
 import SwiftUI
 import Torrent
@@ -125,7 +124,7 @@ struct URLDownloadSheet: View {
         link = "https://downloads.example.com/fonts/Atkinson-Hyperlegible.zip"
         return
       }
-      if link.isEmpty, let text = NSPasteboard.general.string(forType: .string),
+      if link.isEmpty, let text = KitPasteboard.string(),
         Self.parse(text) != nil
       {
         link = text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -1,46 +1,57 @@
+import ComponentKit
 import DevScreenshots
 import SwiftUI
 import Torrent
 import UniformTypeIdentifiers
 
 /// The main window: downloads in the sidebar, details for the selected one
-/// in the detail pane. Torrent details show the file list with per-file
-/// progress, plus a priority mode that assigns download order 1–4; URL
-/// downloads show their progress, source and checksum.
+/// in the detail pane. Torrent details show the files grouped by folder with
+/// per-file progress, plus a priority mode that assigns download order 1–4;
+/// URL downloads show their transfer, source and checksum.
 struct TorrentView: View {
   @State private var store = DownloadStore()
   @State private var showImporter = false
   @State private var showURLSheet = false
   @State private var selectedID: String?
+  @State private var search = ""
   @State private var isDropTargeted = false
   /// The Download from URL sheet is on screen (its open or close animation is over).
   @State private var urlSheetIsUp = false
+  /// The selected torrent's priority mode: clicking files numbers them 1–4.
+  @State private var priorityMode = false
+
+  private var selected: DownloadStore.DownloadItem? {
+    selectedID.flatMap { id in store.items.first { $0.id == id } }
+  }
 
   var body: some View {
     NavigationSplitView {
-      sidebar.navigationSplitViewColumnWidth(min: 200, ideal: 240).tint(.red)
+      // The sidebar's own bottom bar has the toggle.
+      sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 260).toolbar(removing: .sidebarToggle)
     } detail: {
-      if let id = selectedID, let item = store.items.first(where: { $0.id == id }) {
-        switch item.kind {
-        case .torrent: TorrentDetailView(store: store, itemID: item.id)
-        case .url: URLDownloadDetailView(store: store, itemID: item.id)
-        }
-      } else if !store.items.isEmpty {
-        ContentUnavailableView(
-          "Select a Download", systemImage: "arrow.down.circle",
-          description: Text("Choose a download from the sidebar."))
-      }
-    }.contentTransition(.symbolEffect).overlay {
+      detail
+    }
+    .toolbar { toolbar }
+    .navigationTitle(selected?.title ?? "Get")
+    .hidingToolbarTitle()
+    .kitDropTarget(isDropTargeted, cornerRadius: KitMetrics.radiusWindow)
+    .overlay {
       if isDropTargeted {
-        RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor, lineWidth: 2).padding(6)
-          .overlay {
-            Text("Drop to download").font(.headline).padding(10).background(
-              .regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-          }.allowsHitTesting(false)
+        Label("Drop to download", systemImage: "arrow.down")
+          .kitFont(.headline)
+          .padding(.horizontal, 14)
+          .padding(.vertical, 10)
+          .kitSurface(.floating, cornerRadius: KitMetrics.radiusCard)
+          .allowsHitTesting(false)
+          .transition(.opacity)
       }
-    }.onDrop(of: [.fileURL, .url], isTargeted: $isDropTargeted) { providers in
+    }
+    .animation(.kit, value: isDropTargeted)
+    .onDrop(of: [.fileURL, .url], isTargeted: $isDropTargeted) { providers in
       handleDrop(providers)
       return true
+    }.onChange(of: selectedID) {
+      priorityMode = false
     }.onAppear {
       // Hand the live store to the app delegate so "Open With…" events
       // reach it (and any queued from a cold start are drained).
@@ -50,21 +61,6 @@ struct TorrentView: View {
       Screenshots.prepare(waitsForReady: true) { scene in await openDemoScene(scene.arguments) }
       await openDemoScene(CommandLine.arguments)
       Screenshots.ready()
-    }.toolbar {
-      ToolbarItem(placement: .primaryAction) {
-        Button {
-          showImporter = true
-        } label: {
-          Image(systemName: "plus")
-        }.help("Open a .torrent file")
-      }
-      ToolbarItem(placement: .primaryAction) {
-        Button {
-          showURLSheet = true
-        } label: {
-          Image(systemName: "link")
-        }.help("Download a link")
-      }
     }.sheet(isPresented: $showURLSheet) {
       URLDownloadSheet { url, checksum in
         Task { await store.download(from: url, checksum: checksum) }
@@ -85,6 +81,151 @@ struct TorrentView: View {
       Text(store.lastError ?? "")
     }
   }
+
+  // MARK: Detail
+
+  @ViewBuilder private var detail: some View {
+    if let item = selected {
+      switch item.kind {
+      case .torrent: TorrentDetailView(store: store, itemID: item.id, priorityMode: priorityMode)
+      case .url: URLDownloadDetailView(store: store, itemID: item.id)
+      }
+    } else if store.items.isEmpty {
+      EmptyState(
+        systemImage: "arrow.down", title: "No Downloads",
+        message: "Open a .torrent file, or download a link."
+      ) {
+        Button("Open Torrent…") { showImporter = true }.buttonStyle(.kitPrimary)
+        Button("Download a Link…") { showURLSheet = true }.buttonStyle(.kit)
+      }.kitPane()
+    } else {
+      EmptyState(
+        systemImage: "arrow.down", title: "Select a Download",
+        message: "Choose a download from the sidebar."
+      ).kitPane()
+    }
+  }
+
+  // MARK: Toolbar
+
+  /// The rich title (the selected download, or every download summed up) and the tools in card groups.
+  @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+    if #available(macOS 26, *) {
+      ToolbarItem(placement: .navigation) { title }.sharedBackgroundVisibility(.hidden)
+      ToolbarSpacer(.flexible)
+      ToolbarItem(placement: .primaryAction) { tools }.sharedBackgroundVisibility(.hidden)
+    } else {
+      ToolbarItem(placement: .navigation) { title }
+      ToolbarItem(placement: .primaryAction) { tools }
+    }
+  }
+
+  private var title: some View {
+    Group {
+      if let item = selected {
+        KitTitle(item.title, meta: item.metaParts, systemImage: "arrow.down", status: item.workStatus)
+      } else {
+        KitTitle("Get", meta: store.summaryParts, systemImage: "arrow.down", status: store.overallStatus)
+      }
+    }.padding(.leading, 6)
+  }
+
+  private var tools: some View {
+    HStack(spacing: KitMetrics.gutter) {
+      ToolGroup(iconOnly: true) {
+        Button("Open a .torrent file", systemImage: "plus") { showImporter = true }
+          .help("Open a .torrent file")
+        Button("Download a link", systemImage: "link") { showURLSheet = true }
+          .help("Download a link")
+      }
+      if let item = selected {
+        let onDisk = store.existingLocation(itemID: item.id) != nil
+        ToolGroup(iconOnly: true) {
+          Button("Show in Finder", systemImage: "folder") { store.reveal(itemID: item.id) }
+            .help("Show in Finder").disabled(!onDisk)
+          if item.isSingleFile {
+            Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
+              .help("Open in its default app").disabled(!onDisk)
+          }
+        }
+        if item.isActive || canSetPriority(item) {
+          ToolGroup {
+            itemActions(item)
+          }
+        }
+        ToolGroup(iconOnly: true) {
+          Button("Move download to Trash", systemImage: "trash") {
+            Task { await store.trash(itemID: item.id) }
+          }.help("Move download to Trash")
+        }
+      }
+    }
+  }
+
+  @ViewBuilder private func itemActions(_ item: DownloadStore.DownloadItem) -> some View {
+    switch item.kind {
+    case .torrent:
+      if canSetPriority(item) {
+        Button(priorityMode ? "Done" : "Priority") {
+          // Entering the mode clears all priorities; leaving it keeps the assigned ones.
+          if !priorityMode { store.clearAllPriorities(itemID: item.id) }
+          priorityMode.toggle()
+        }.help("Assign file download priority (1–4)")
+      }
+    case .url:
+      switch item.state {
+      case .downloading, .paused:
+        Button(
+          item.state == .paused ? "Resume" : "Pause",
+          systemImage: item.state == .paused ? "play.fill" : "pause.fill"
+        ) {
+          store.togglePause(itemID: item.id)
+        }.labelStyle(.iconOnly).help(item.state == .paused ? "Resume" : "Pause")
+      case .failed:
+        Button("Retry", systemImage: "arrow.clockwise") { store.retry(itemID: item.id) }
+          .labelStyle(.iconOnly).help("Try again from where it stopped")
+      default:
+        EmptyView()
+      }
+    }
+    if item.isActive {
+      Button("Cancel", role: .destructive) { store.cancel(itemID: item.id) }
+    }
+  }
+
+  private func canSetPriority(_ item: DownloadStore.DownloadItem) -> Bool {
+    item.kind == .torrent && item.files.count > 1 && (item.state == .downloading || item.state == .paused)
+  }
+
+  // MARK: Sidebar
+
+  private var sidebar: some View {
+    KitSidebar(selection: $selectedID, searchText: $search, searchPrompt: "Search Downloads") {
+      KitSection(
+        "Downloads", meta: store.sectionMeta, systemImage: "arrow.down", status: store.overallStatus
+      ) {
+        ForEach(shownItems) { item in
+          DownloadRow(
+            item: item, onTogglePause: { store.togglePause(itemID: item.id) },
+            onTrash: { Task { await store.trash(itemID: item.id) } },
+            onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) },
+            onRetry: { store.retry(itemID: item.id) })
+        }
+      } accessory: {
+        Button("Open a .torrent file", systemImage: "plus") { showImporter = true }
+      }
+    } bottomBar: {
+      Button("Download a Link", systemImage: "link") { showURLSheet = true }
+    }
+  }
+
+  private var shownItems: [DownloadStore.DownloadItem] {
+    let query = search.trimmingCharacters(in: .whitespaces)
+    guard !query.isEmpty else { return store.items }
+    return store.items.filter { $0.title.localizedCaseInsensitiveContains(query) }
+  }
+
+  // MARK: Screenshots and drops
 
   /// A screenshot scene of the demo list, from its arguments: `--select <title>` shows that download and `--add-url`
   /// opens the Download from URL sheet. What the arguments don't mention is closed, so a scene never keeps the one
@@ -122,62 +263,40 @@ struct TorrentView: View {
       }
     }
   }
+}
 
-  /// Sidebar: one row per download with title and progress.
-  private var sidebar: some View {
-    List(selection: $selectedID) {
-      ForEach(store.items) { item in
-        SidebarRow(
-          item: item, onTogglePause: { store.togglePause(itemID: item.id) },
-          onTrash: { Task { await store.trash(itemID: item.id) } },
-          onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) },
-          onRetry: { store.retry(itemID: item.id) }
-        ).tag(item.id)
-      }
-    }.navigationTitle("Downloads").overlay {
-      if store.items.isEmpty {
-        ContentUnavailableView(
-          "No Downloads", systemImage: "arrow.down.circle",
-          description: Text("Open a .torrent file, or download a link."))
-      }
+extension View {
+  /// Hides the window's own title where the system allows it (macOS 15): the toolbar's rich title replaces it.
+  @ViewBuilder fileprivate func hidingToolbarTitle() -> some View {
+    if #available(macOS 15, *) {
+      toolbar(removing: .title)
+    } else {
+      self
     }
   }
 }
 
-/// Compact sidebar row: title, mini progress bar, state line, pause button.
-private struct SidebarRow: View {
+/// A sidebar row: the title, one status line, the microbar while there is work left, and one small action (pause,
+/// resume, retry, or Show in Finder once it's done).
+private struct DownloadRow: View {
   let item: DownloadStore.DownloadItem
   let onTogglePause: () -> Void
   let onTrash: () -> Void
   let onOpen: () -> Void
   let onReveal: () -> Void
   let onRetry: () -> Void
-  @Environment(\.colorScheme) private var colorScheme
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 2) {
+    SidebarRow(value: item.id, item.title, subtitle: item.rowStatus) {
+      EmptyView()
+    } trailing: {
       HStack(spacing: 4) {
-        Text(item.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-        if case .failed = item.state, item.kind == .url {
-          Button(action: onRetry) {
-            Image(systemName: "arrow.clockwise")
-          }.buttonStyle(.borderless).help("Retry")
+        if item.showsBar {
+          MicroBar(value: item.progress, hue: item.state == .paused ? .gray : .accent, width: 32)
         }
-        if item.state == .downloading || item.state == .paused {
-          Button(action: onTogglePause) {
-            Image(systemName: item.state == .paused ? "play.fill" : "pause.fill")
-          }.buttonStyle(.borderless).help(item.state == .paused ? "Resume" : "Pause")
-        }
+        action
       }
-      // Made anew when the appearance changes: AppKit's bar loses the red tint otherwise and turns the accent color.
-      ProgressView(value: item.progress).controlSize(.small).id(colorScheme)
-      HStack(spacing: 4) {
-        Text(item.state.label)
-        if !item.speed.isEmpty { Text("· \(item.speed)") }
-        Spacer(minLength: 0)
-        Text("\(Int(item.progress * 100))%").monospacedDigit()
-      }.contentTransition(.numericText()).font(.caption2).foregroundStyle(.secondary)
-    }.padding(.vertical, 2).contextMenu {
+    }.contextMenu {
       if item.isSingleFile { Button("Open") { onOpen() } }
       Button("Show in Finder") { onReveal() }
       Divider()
@@ -185,112 +304,154 @@ private struct SidebarRow: View {
         Button(item.state == .paused ? "Resume" : "Pause") { onTogglePause() }
       }
       Button("Move to Trash", role: .destructive) { onTrash() }
-    }.animation(.smooth, value: item.state)
+    }
+  }
+
+  @ViewBuilder private var action: some View {
+    switch item.state {
+    case .downloading, .paused:
+      Button(
+        item.state == .paused ? "Resume" : "Pause",
+        systemImage: item.state == .paused ? "play.fill" : "pause.fill", action: onTogglePause
+      ).buttonStyle(.kitIcon).help(item.state == .paused ? "Resume" : "Pause")
+    case .failed where item.kind == .url:
+      Button("Retry", systemImage: "arrow.clockwise", action: onRetry).buttonStyle(.kitIcon).help("Retry")
+    case .completed:
+      Button("Show in Finder", systemImage: "folder", action: onReveal).buttonStyle(.kitIcon)
+        .help("Show in Finder")
+    default:
+      EmptyView()
+    }
   }
 }
 
-/// Detail pane for one torrent: header stats, overall progress, and the file
-/// list with per-file progress and an optional priority mode.
+// MARK: - Torrent detail
+
+/// Detail pane for one torrent: the swarm line, then its files. A single file is one row with its sequential and
+/// verified progress; several files are grouped by folder into cards whose live icons carry each folder's progress.
 private struct TorrentDetailView: View {
   let store: DownloadStore
   let itemID: String
-
-  @State private var priorityMode = false
+  let priorityMode: Bool
 
   private var item: DownloadStore.DownloadItem {
     store.items.first { $0.id == itemID } ?? .init(id: itemID, title: "")
   }
 
   var body: some View {
-    List {
-      Section {
-        ForEach(item.orderedFiles) { file in
-          FileRow(
-            file: file, priorityMode: priorityMode,
-            onTogglePause: { store.toggleFilePaused(fileIndex: file.index, itemID: itemID) },
-            onRemove: { store.removeFile(fileIndex: file.index, itemID: itemID) },
-            onRestore: { store.restoreFile(fileIndex: file.index, itemID: itemID) }
-          ).contentShape(Rectangle()).onTapGesture(count: 2) {
-            guard !priorityMode else { return }
-            store.openFile(fileIndex: file.index, itemID: itemID)
-          }.onTapGesture {
-            guard priorityMode else { return }
-            togglePriority(for: file)
-          }.contextMenu {
-            let onDisk = store.existingFileURL(fileIndex: file.index, itemID: itemID) != nil
-            Button("Open") { store.openFile(fileIndex: file.index, itemID: itemID) }
-              .disabled(!onDisk)
-            Button("Show in Finder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
-              .disabled(!onDisk)
-            // Restrict the download to this file (or this file and every file
-            // after it): every other file that isn't fully downloaded is
-            // paused and trashed.
-            if item.files.count > 1 {
-              Menu("Download") {
-                Button("Only this") {
-                  store.downloadOnly(fileIndex: file.index, itemID: itemID)
-                }
-                Button("Only this and after") {
-                  store.downloadOnly(fileIndex: file.index, itemID: itemID, andAfter: true)
-                }
-              }
-            }
+    ScrollView {
+      VStack(alignment: .leading, spacing: KitMetrics.gutter) {
+        header
+        if item.files.count == 1, let file = item.files.first {
+          SingleFileRow(
+            file: file, onTogglePause: { store.toggleFilePaused(fileIndex: file.index, itemID: itemID) }
+          ).contextMenu { fileMenu(file) }
+        } else {
+          ForEach(FileGroup.groups(of: item)) { group in
+            groupCard(group)
           }
         }
-      }
-    }.safeAreaInset(edge: .top) { VStack { header }.padding(.horizontal) }.tint(.red)
-      .navigationTitle(item.title).toolbar {
-        LocationToolbar(store: store, item: item)
-        ToolbarItem(placement: .primaryAction) {
-          if !item.files.isEmpty, item.state == .downloading || item.state == .paused {
-            Button(priorityMode ? "Done" : "Priority") {
-              if priorityMode {
-                // Leaving the mode keeps the assigned priorities.
-              } else {
-                // Entering the mode clears all priorities.
-                store.clearAllPriorities(itemID: itemID)
-              }
-              priorityMode.toggle()
-            }.help("Assign file download priority (1–4)")
-          }
-        }
-        ToolbarItem(placement: .automatic) {
-          if item.state != .stopped && item.state != .completed {
-            Button("Cancel", role: .destructive) { store.cancel(itemID: itemID) }
-          }
-        }
-        ToolbarItem(placement: .automatic) {
-          Button {
-            Task { await store.trash(itemID: itemID) }
-          } label: {
-            Image(systemName: "trash")
-          }.help("Move download to Trash")
-        }
-      }
+      }.padding(.horizontal, 14).padding(.bottom, 14)
+    }.kitPane(item.files.count == 1 ? .content : .secondary)
   }
 
   // MARK: Header
 
+  /// The swarm line: the state, connected peers and seeders, the tracker's swarm counts.
   private var header: some View {
     VStack(alignment: .leading, spacing: 6) {
-      // Detailed status: connected peers, seeders, tracker swarm counts.
-      HStack(spacing: 12) {
-        Text(item.state.label)
-        LabeledContent("Peers") { Text("\(item.peers)").monospacedDigit() }
-        LabeledContent("Seeds") { Text("\(item.seeders)").monospacedDigit() }
+      HStack(spacing: 16) {
+        Chip(item.state.label, hue: item.state.hue).controlSize(.small)
+        stat("Peers", "\(item.peers)")
+        stat("Seeds", "\(item.seeders)")
         if let s = item.trackerSeeders, let l = item.trackerLeechers {
-          LabeledContent("Swarm") { Text("\(s) seeds · \(l) leechers").monospacedDigit() }
+          stat("Swarm", "\(s) seeds · \(l) leechers")
         }
-      }.font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-      if let error = item.error { Text(error).font(.caption).foregroundStyle(.red) }
+      }.frame(height: 36)
+      if let error = item.error {
+        Banner("Download failed", message: error, systemImage: "exclamationmark.triangle", hue: .red)
+      }
       if priorityMode {
-        Text("Click files to set priority 1–4; others download after.").font(.caption)
-          .foregroundStyle(.secondary)
+        Text("Click files to set priority 1–4; others download after.").kitFont(.caption)
+          .padding(.bottom, 4)
+      }
+    }.padding(.horizontal, 10).kitFont(.caption)
+  }
+
+  private func stat(_ key: String, _ value: String) -> some View {
+    HStack(spacing: 5) {
+      Text(key).foregroundStyle(.kitSecondary)
+      Text(value).monospacedDigit()
+    }
+  }
+
+  // MARK: Groups
+
+  private func groupCard(_ group: FileGroup) -> some View {
+    KitSection(
+      group.name, meta: group.meta(speed: item.speed),
+      systemImage: group.status.isWorking ? "arrow.down" : group.isFolder ? "folder" : "doc",
+      hue: group.status == .idle ? .gray : .accent, status: group.status
+    ) {
+      ForEach(group.files) { file in
+        fileRow(file)
+      }
+    } accessory: {
+      if item.state == .downloading || item.state == .paused, group.status.isWorking || group.isPaused {
+        let paused = group.isPaused
+        Button(paused ? "Resume \(group.name)" : "Pause \(group.name)", systemImage: paused ? "play.fill" : "pause.fill") {
+          for file in group.files where !file.isRemoved && !file.isDone {
+            store.setFilePaused(!paused, fileIndex: file.index, itemID: itemID)
+          }
+        }.help(paused ? "Resume this folder" : "Pause this folder")
       }
     }
   }
 
-  // MARK: File list
+  private func fileRow(_ file: DownloadStore.DownloadFileItem) -> some View {
+    SidebarRow(file.name) {
+      EmptyView()
+    } trailing: {
+      FileTrail(file: file, priorityMode: priorityMode)
+    }
+    .opacity(file.isRemoved ? 0.5 : 1)
+    .onTapGesture(count: 2) {
+      guard !priorityMode else { return }
+      store.openFile(fileIndex: file.index, itemID: itemID)
+    }.onTapGesture {
+      guard priorityMode else { return }
+      togglePriority(for: file)
+    }.contextMenu { fileMenu(file) }
+  }
+
+  @ViewBuilder private func fileMenu(_ file: DownloadStore.DownloadFileItem) -> some View {
+    let onDisk = store.existingFileURL(fileIndex: file.index, itemID: itemID) != nil
+    Button("Open") { store.openFile(fileIndex: file.index, itemID: itemID) }.disabled(!onDisk)
+    Button("Show in Finder") { store.revealFile(fileIndex: file.index, itemID: itemID) }.disabled(!onDisk)
+    Divider()
+    if file.isRemoved {
+      Button("Restore File") { store.restoreFile(fileIndex: file.index, itemID: itemID) }
+    } else if !file.isDone {
+      Button(file.isPaused ? "Resume File" : "Pause File") {
+        store.toggleFilePaused(fileIndex: file.index, itemID: itemID)
+      }
+      // Trash a paused file to remove it from the download.
+      if file.isPaused {
+        Button("Remove File", role: .destructive) { store.removeFile(fileIndex: file.index, itemID: itemID) }
+      }
+    }
+    // Restrict the download to this file (or this file and every file
+    // after it): every other file that isn't fully downloaded is
+    // paused and trashed.
+    if item.files.count > 1 {
+      Menu("Download") {
+        Button("Only this") { store.downloadOnly(fileIndex: file.index, itemID: itemID) }
+        Button("Only this and after") {
+          store.downloadOnly(fileIndex: file.index, itemID: itemID, andAfter: true)
+        }
+      }
+    }
+  }
 
   private func togglePriority(for file: DownloadStore.DownloadFileItem) {
     if file.priority > 0 {
@@ -304,119 +465,212 @@ private struct TorrentDetailView: View {
   }
 }
 
-/// Toolbar buttons that open the download in its default app (single-file
-/// downloads) and show it in Finder. Disabled until it exists on disk.
-struct LocationToolbar: ToolbarContent {
-  let store: DownloadStore
-  let item: DownloadStore.DownloadItem
+/// A file row's end: its priority, then its progress (the microbar and percent), its state, or its size once done.
+private struct FileTrail: View {
+  let file: DownloadStore.DownloadFileItem
+  let priorityMode: Bool
 
-  var body: some ToolbarContent {
-    let onDisk = store.existingLocation(itemID: item.id) != nil
-    ToolbarItem(placement: .automatic) {
-      Button {
-        store.reveal(itemID: item.id)
-      } label: {
-        Label("Show in Finder", systemImage: "folder")
-      }.help("Show in Finder").disabled(!onDisk)
-    }
-    if item.isSingleFile {
-      ToolbarItem(placement: .automatic) {
-        Button {
-          store.open(itemID: item.id)
-        } label: {
-          Label("Open", systemImage: "arrow.up.forward.app")
-        }.help("Open in its default app").disabled(!onDisk)
+  var body: some View {
+    HStack(spacing: 6) {
+      if file.priority > 0 {
+        Chip("P\(file.priority)", hue: .accent).controlSize(.small)
       }
-    }
+      if file.isRemoved {
+        Text("Removed")
+      } else if file.isDone {
+        Text(Int64(file.length), format: .byteCount(style: .file))
+      } else if file.isPaused {
+        Text("Paused")
+      } else if file.verifiedBytes > 0 {
+        ProgressRow(value: file.progress)
+      } else if priorityMode, file.priority == 0 {
+        Text("Click to prioritize")
+      } else {
+        Text("Waiting")
+      }
+    }.foregroundStyle(.kitSecondary)
   }
 }
 
-/// One file row: name, size, per-file progress, priority badge, pause button,
-/// and (when paused) a trash button to remove the file, plus a restore action
-/// for removed files.
-private struct FileRow: View {
+/// A single-file torrent's one row: the name, pause, the size, then the sequential progress over the verified one and
+/// the byte counts.
+private struct SingleFileRow: View {
   let file: DownloadStore.DownloadFileItem
-  let priorityMode: Bool
   let onTogglePause: () -> Void
-  let onRemove: () -> Void
-  let onRestore: () -> Void
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 3) {
-      HStack(spacing: 6) {
-        // A removed file is shown struck-through so it is clear it no longer
-        // belongs to the download (and can be restored).
-        Text(file.path).strikethrough(file.isRemoved).lineLimit(1).truncationMode(.middle)
-        Spacer()
-        if file.priority > 0 {
-          Text("P\(file.priority)").font(.caption.weight(.semibold)).padding(.horizontal, 5)
-            .padding(.vertical, 1).background(Capsule().fill(Color.accentColor.opacity(0.15)))
-            .foregroundStyle(.tint)
+    VStack(alignment: .leading, spacing: 5) {
+      HStack(spacing: 8) {
+        Text(file.path).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
+        if !file.isDone && !file.isRemoved {
+          Button(
+            file.isPaused ? "Resume file" : "Pause file",
+            systemImage: file.isPaused ? "play.circle" : "pause.circle", action: onTogglePause
+          ).buttonStyle(.kitIcon).help(file.isPaused ? "Resume file" : "Pause file")
         }
-        if file.isRemoved {
-          Text("Removed").font(.caption).foregroundStyle(.secondary)
-        } else if file.isPaused {
-          Text("Paused").font(.caption).foregroundStyle(.secondary)
-        }
-        if file.isRemoved {
-          // A removed file can be "unpaused" to continue downloading.
-          Button(action: onRestore) {
-            Image(systemName: "play.circle")
-          }.buttonStyle(.borderless).help("Restore file to download")
-        } else if file.isPaused {
-          Button(action: onTogglePause) {
-            Image(systemName: "play.circle")
-          }.buttonStyle(.borderless).help("Resume file")
-          // Trash a paused file to remove it from the download.
-          Button(action: onRemove) {
-            Image(systemName: "trash")
-          }.buttonStyle(.borderless).foregroundStyle(.red).help("Remove file")
-        } else {
-          Button(action: onTogglePause) {
-            Image(systemName: "pause.circle")
-          }.buttonStyle(.borderless).help("Pause file")
-        }
-        Text(Self.formatSize(file.length)).font(.caption).foregroundStyle(.secondary)
-          .monospacedDigit()
+        Text(Int64(file.length), format: .byteCount(style: .file)).kitFont(.caption).monospacedDigit()
+          .frame(minWidth: 54, alignment: .trailing)
       }
-      DualProgressView(
-        primary: file.sequentialBytes, secondary: file.verifiedBytes, total: file.length
-      ).opacity(file.isRemoved ? 0.2 : (file.isPaused ? 0.4 : 1))
-      Text("\(Text(file.sequentialBytes, format: .byteCount(style: .file))) / \(Text(file.verifiedBytes, format: .byteCount(style: .file)))")
-        .font(.caption).foregroundStyle(.secondary)
-      if priorityMode {
-        Text(file.priority > 0 ? "Click to clear" : "Click to prioritize").font(.caption2)
-          .foregroundStyle(.tertiary)
+      if !file.isDone {
+        DualProgressView(primary: file.sequentialBytes, secondary: file.verifiedBytes, total: file.length)
+          .opacity(file.isPaused ? 0.4 : 1)
       }
-    }.padding(.vertical, 2).opacity(file.isRemoved ? 0.5 : (file.isPaused ? 0.75 : 1))
+      Text(
+        "\(Text(file.sequentialBytes, format: .byteCount(style: .file))) / \(Text(file.verifiedBytes, format: .byteCount(style: .file)))"
+      ).kitFont(.caption).monospacedDigit()
+    }.padding(.horizontal, 10).padding(.vertical, 7).opacity(file.isPaused ? 0.75 : 1)
   }
+
+  /// The sequential bytes (playable from the start) over the verified ones, which may run ahead. The kit's bars carry
+  /// one value; this one carries two.
   struct DualProgressView: View {
     let primary: Int64
     let secondary: Int64
     let total: Int64
-    var primaryProgress: Double { max(0, min(Double(primary) / Double(total), 1)) }
-    var secondaryProgress: Double { max(0, min(Double(secondary) / Double(total), 1)) }
+    var primaryProgress: Double { max(0, min(Double(primary) / Double(max(total, 1)), 1)) }
+    var secondaryProgress: Double { max(0, min(Double(secondary) / Double(max(total, 1)), 1)) }
     var body: some View {
       GeometryReader { view in
         ZStack(alignment: .leading) {
-          Capsule().fill(.primary.opacity(0.05)).frame(width: view.size.width, height: 2)
-          Capsule().fill(.tint.opacity(0.5)).frame(
-            width: view.size.width * secondaryProgress, height: 2)
-          Capsule().fill(.tint).frame(width: view.size.width * primaryProgress, height: 4)
+          Capsule().fill(.kitFill)
+          Capsule().fill(Hue.accent.soft(0.35)).frame(width: view.size.width * secondaryProgress)
+          Capsule().fill(.kitAccent).frame(width: view.size.width * primaryProgress)
         }
-      }.frame(height: 4)
+      }.frame(height: 4).animation(.kit, value: primary)
+    }
+  }
+}
+
+/// The files of one folder of a torrent (files at the top level make the group "Other"), in download order.
+private struct FileGroup: Identifiable {
+  let name: String
+  let isFolder: Bool
+  var files: [DownloadStore.DownloadFileItem]
+  var id: String { (isFolder ? "d:" : "f:") + name }
+
+  /// The torrent's files by folder, each group where its first file comes in the download order.
+  static func groups(of item: DownloadStore.DownloadItem) -> [FileGroup] {
+    var groups: [FileGroup] = []
+    for file in item.orderedFiles {
+      let folder = file.folder
+      if let index = groups.firstIndex(where: { $0.isFolder == (folder != nil) && $0.name == (folder ?? "Other") }) {
+        groups[index].files.append(file)
+      } else {
+        groups.append(FileGroup(name: folder ?? "Other", isFolder: folder != nil, files: [file]))
+      }
+    }
+    // Loose files go last, under "Other"; with no folders at all they are just "Files".
+    groups.sort { a, b in a.isFolder && !b.isFolder }
+    if groups.count == 1, !groups[0].isFolder {
+      groups[0] = FileGroup(name: "Files", isFolder: false, files: groups[0].files)
+    }
+    return groups
+  }
+
+  private var kept: [DownloadStore.DownloadFileItem] { files.filter { !$0.isRemoved } }
+  private var length: Int64 { kept.reduce(0) { $0 + $1.length } }
+  private var verified: Int64 { kept.reduce(0) { $0 + min($1.verifiedBytes, $1.length) } }
+  var hasWorkLeft: Bool { kept.contains { !$0.isDone } }
+  var isPaused: Bool { kept.contains { !$0.isDone } && kept.filter { !$0.isDone }.allSatisfy(\.isPaused) }
+
+  var status: WorkStatus {
+    guard !kept.isEmpty, length > 0 else { return .idle }
+    if !hasWorkLeft { return .done }
+    let progress = Double(verified) / Double(length)
+    if isPaused { return .paused(progress: progress) }
+    return verified > 0 ? .working(progress: progress) : .idle
+  }
+
+  /// "3 files · 15.3 MB · done", "2 files · 2.9 of 11.3 MB · 6.1 MB/s", "2 files · waiting".
+  func meta(speed: String) -> [String] {
+    let count = files.count == 1 ? "1 file" : "\(files.count) files"
+    let size = Int64(length).formatted(.byteCount(style: .file))
+    switch status {
+    case .done: return [count, size, "done"]
+    case .working: return [count, "\(Int64(verified).formatted(.byteCount(style: .file))) of \(size)", speed]
+    case .paused: return [count, "\(Int64(verified).formatted(.byteCount(style: .file))) of \(size)", "paused"]
+    default: return files.count == 1 ? [count, size] : [count, "waiting"]
+    }
+  }
+}
+
+extension DownloadStore.DownloadFileItem {
+  /// The file's own name, without its folders.
+  var name: String { path.split(separator: "/").last.map(String.init) ?? path }
+  /// The folder it is in ("02 Sintra"), `nil` at the top level.
+  var folder: String? {
+    let parts = path.split(separator: "/")
+    return parts.count > 1 ? parts.dropLast().joined(separator: "/") : nil
+  }
+  var isDone: Bool { verifiedBytes >= length }
+  var progress: Double { length > 0 ? Double(verifiedBytes) / Double(length) : 0 }
+}
+
+extension DownloadStore.DownloadItem {
+  /// Not finished, stopped or failed: it can still be paused or cancelled.
+  var isActive: Bool { state != .stopped && state != .completed && !state.isFailed }
+
+  /// The work for live icons: the ring carries the progress, gray while paused, green once done, red when it failed.
+  var workStatus: WorkStatus {
+    switch state {
+    case .downloading, .checking: .working(progress: kind == .url && totalBytes == nil ? nil : progress)
+    case .paused: .paused(progress: progress)
+    case .completed: .done
+    case .failed(let message): .failed(message)
+    case .stopped: .idle
     }
   }
 
-  private static func formatSize(_ bytes: Int64) -> String {
-    let units = ["B", "KB", "MB", "GB"]
-    var value = Double(bytes)
-    var unit = 0
-    while value >= 1024, unit < units.count - 1 {
-      value /= 1024
-      unit += 1
+  /// The toolbar title's meta: "Downloading · 18.4 MB/s · 62%".
+  var metaParts: [String] {
+    switch state {
+    case .completed: [state.label, totalLength.map { $0.formatted(.byteCount(style: .file)) } ?? ""]
+    case .failed, .stopped: [state.label]
+    default: [state.label, speed, "\(Int(progress * 100))%"]
     }
-    return String(format: "%.1f %@", value, units[unit])
+  }
+
+  /// The sidebar row's status line: "62% · 18.4 MB/s", "Paused · 14%", "Completed · 784 MB".
+  var rowStatus: String {
+    let parts = state == .downloading ? ["\(Int(progress * 100))%", speed] : metaParts
+    return parts.filter { !$0.isEmpty }.joined(separator: " · ")
+  }
+
+  /// A bar while there is work left; finished, stopped and failed downloads drop theirs.
+  var showsBar: Bool { state == .downloading || state == .paused || state == .checking }
+
+  /// The download's size: the files' for a torrent, the server's for a link.
+  var totalLength: Int64? {
+    kind == .url ? totalBytes : files.isEmpty ? nil : files.reduce(0) { $0 + $1.length }
+  }
+}
+
+extension DownloadStore {
+  private var activeItems: [DownloadItem] { items.filter { $0.state == .downloading || $0.state == .checking } }
+
+  /// Every active download's progress at once, for the section's and the window's live icon.
+  var overallStatus: WorkStatus {
+    let active = activeItems
+    guard !active.isEmpty else { return items.contains { $0.state == .paused } ? .paused(progress: nil) : .idle }
+    return .working(progress: active.reduce(0) { $0 + $1.progress } / Double(active.count))
+  }
+
+  /// "3 downloading · 27.7 MB/s", or how many there are when nothing runs.
+  var sectionMeta: [String] {
+    let active = activeItems
+    guard !active.isEmpty else {
+      return [items.isEmpty ? "No downloads" : items.count == 1 ? "1 download" : "\(items.count) downloads"]
+    }
+    return ["\(active.count) downloading", Self.formatSpeed(active.reduce(0) { $0 + $1.bytesPerSecond })]
+  }
+
+  /// The window title's meta with nothing selected: "5 downloads · 3 active · 60%".
+  var summaryParts: [String] {
+    var parts = [items.count == 1 ? "1 download" : "\(items.count) downloads"]
+    if case .working(let progress?) = overallStatus {
+      parts += ["\(activeItems.count) active", "\(Int(progress * 100))%"]
+    }
+    return parts
   }
 }
 
@@ -431,4 +685,17 @@ extension TorrentState {
     case .failed: "Failed"
     }
   }
+
+  /// The hue its chip speaks in.
+  var hue: Hue {
+    switch self {
+    case .downloading: .blue
+    case .checking: .orange
+    case .completed: .green
+    case .failed: .red
+    case .stopped, .paused: .gray
+    }
+  }
+
+  var isFailed: Bool { if case .failed = self { true } else { false } }
 }

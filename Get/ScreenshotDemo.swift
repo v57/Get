@@ -40,7 +40,7 @@ enum ScreenshotDemo {
     var ubuntu = Item(id: "demo-ubuntu", title: "ubuntu-26.04-desktop-amd64.iso")
     ubuntu.state = .downloading
     ubuntu.progress = 0.62
-    ubuntu.speed = "18.4 MB/s"
+    ubuntu.bytesPerSecond = 18.4 * 1_048_576
     ubuntu.peers = 47
     ubuntu.seeders = 31
     ubuntu.trackerSeeders = 2_814
@@ -51,7 +51,7 @@ enum ScreenshotDemo {
     var photos = Item(id: "demo-photos", title: "Open Photo Archive 2026")
     photos.state = .downloading
     photos.progress = 0.38
-    photos.speed = "6.1 MB/s"
+    photos.bytesPerSecond = 6.1 * 1_048_576
     photos.peers = 12
     photos.seeders = 5
     photos.isSingleFile = false
@@ -76,7 +76,7 @@ enum ScreenshotDemo {
     font.kind = .url
     font.state = .downloading
     font.progress = 0.81
-    font.speed = "3.2 MB/s"
+    font.bytesPerSecond = 3.2 * 1_048_576
     font.sourceURL = URL(string: "https://downloads.example.com/fonts/Atkinson-Hyperlegible.zip")
     font.receivedBytes = 38_900_000
     font.totalBytes = 48_000_000

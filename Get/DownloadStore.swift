@@ -49,7 +49,10 @@ import os
     var title: String
     var state: TorrentState = .stopped
     var progress: Double = 0
-    var speed: String = ""
+    /// Download speed in bytes per second; 0 unless downloading.
+    var bytesPerSecond: Double = 0
+    /// The speed as shown ("18.4 MB/s"), empty unless downloading.
+    var speed: String { DownloadStore.formatSpeed(bytesPerSecond) }
     var peers: Int = 0
     /// Connected peers that hold every piece.
     var seeders: Int = 0
@@ -281,7 +284,7 @@ import os
 
     if let index = items.firstIndex(where: { $0.id == itemID }) {
       items[index].state = .stopped
-      items[index].speed = ""
+      items[index].bytesPerSecond = 0
       items[index].peers = 0
     }
   }
@@ -461,7 +464,7 @@ import os
         case .failed(let message): .failed(message)
         }
       items[index].state = shown
-      if shown != .downloading { items[index].speed = "" }
+      if shown != .downloading { items[index].bytesPerSecond = 0 }
       switch state {
       case .failed(let message):
         items[index].error = message
@@ -481,8 +484,7 @@ import os
       items[index].progress = stats.progress
       items[index].connections = stats.connections
       items[index].resumable = stats.resumable
-      items[index].speed =
-        items[index].state == .downloading ? Self.formatSpeed(stats.downloadSpeed) : ""
+      items[index].bytesPerSecond = items[index].state == .downloading ? stats.downloadSpeed : 0
     case .file(let url):
       items[index].location = url
       items[index].title = url.lastPathComponent
@@ -741,7 +743,7 @@ import os
       items[index].state = state
       // Speed is only meaningful while downloading; a finished, paused or
       // failed download must not keep showing its last reading.
-      if state != .downloading { items[index].speed = "" }
+      if state != .downloading { items[index].bytesPerSecond = 0 }
       if case .failed(let message) = state {
         items[index].error = message
         Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
@@ -760,8 +762,7 @@ import os
       }
     case .stats(let stats):
       items[index].progress = stats.progress
-      items[index].speed =
-        items[index].state == .downloading ? Self.formatSpeed(stats.downloadSpeed) : ""
+      items[index].bytesPerSecond = items[index].state == .downloading ? stats.downloadSpeed : 0
       items[index].peers = stats.peersConnected
       items[index].seeders = stats.seedersConnected
       items[index].trackerSeeders = stats.trackerSeeders
@@ -858,7 +859,7 @@ import os
     return da == db
   }
 
-  private static func formatSpeed(_ bytesPerSecond: Double) -> String {
+  static func formatSpeed(_ bytesPerSecond: Double) -> String {
     guard bytesPerSecond > 0 else { return "" }
     let units = ["B/s", "KB/s", "MB/s", "GB/s"]
     var value = bytesPerSecond

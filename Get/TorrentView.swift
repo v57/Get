@@ -33,7 +33,7 @@ struct TorrentView: View {
     }
     .toolbar { toolbar }
     .navigationTitle(selected?.title ?? "Get")
-    .hidingToolbarTitle()
+    .kitHidesSystemTitle()
     .kitDropTarget(isDropTargeted, cornerRadius: KitMetrics.radiusWindow)
     .overlay {
       if isDropTargeted {
@@ -110,14 +110,11 @@ struct TorrentView: View {
 
   /// The rich title (the selected download, or every download summed up) and the tools in card groups.
   @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+    KitToolbarItem(placement: .navigation) { title }
     if #available(macOS 26, *) {
-      ToolbarItem(placement: .navigation) { title }.sharedBackgroundVisibility(.hidden)
       ToolbarSpacer(.flexible)
-      ToolbarItem(placement: .primaryAction) { tools }.sharedBackgroundVisibility(.hidden)
-    } else {
-      ToolbarItem(placement: .navigation) { title }
-      ToolbarItem(placement: .primaryAction) { tools }
     }
+    KitToolbarItem(placement: .primaryAction) { tools }
   }
 
   private var title: some View {
@@ -153,11 +150,9 @@ struct TorrentView: View {
             itemActions(item)
           }
         }
-        ToolGroup(iconOnly: true) {
-          Button("Move download to Trash", systemImage: "trash") {
-            Task { await store.trash(itemID: item.id) }
-          }.help("Move download to Trash")
-        }
+        Button("Move download to Trash", systemImage: "trash", role: .destructive) {
+          Task { await store.trash(itemID: item.id) }
+        }.buttonStyle(.kitRound).help("Move download to Trash")
       }
     }
   }
@@ -265,19 +260,8 @@ struct TorrentView: View {
   }
 }
 
-extension View {
-  /// Hides the window's own title where the system allows it (macOS 15): the toolbar's rich title replaces it.
-  @ViewBuilder fileprivate func hidingToolbarTitle() -> some View {
-    if #available(macOS 15, *) {
-      toolbar(removing: .title)
-    } else {
-      self
-    }
-  }
-}
-
-/// A sidebar row: the title, one status line, the microbar while there is work left, and one small action (pause,
-/// resume, retry, or Show in Finder once it's done).
+/// A sidebar row: the title, one status line, the progress bar under them while there is work left, and one small
+/// action (pause, resume, retry, or Show in Finder once it's done).
 private struct DownloadRow: View {
   let item: DownloadStore.DownloadItem
   let onTogglePause: () -> Void
@@ -290,13 +274,10 @@ private struct DownloadRow: View {
     SidebarRow(value: item.id, item.title, subtitle: item.rowStatus) {
       EmptyView()
     } trailing: {
-      HStack(spacing: 4) {
-        if item.showsBar {
-          MicroBar(value: item.progress, hue: item.state == .paused ? .gray : .accent, width: 32)
-        }
-        action
-      }
-    }.contextMenu {
+      action
+    }
+    .progress(item.showsBar ? item.progress : nil)
+    .contextMenu {
       if item.isSingleFile { Button("Open") { onOpen() } }
       Button("Show in Finder") { onReveal() }
       Divider()
@@ -414,17 +395,16 @@ private struct TorrentDetailView: View {
     } trailing: {
       FileTrail(file: file, priorityMode: priorityMode)
     }
+    // A click sets the file's priority while assigning them; otherwise the row does nothing on one click.
+    .action {
+      if priorityMode { togglePriority(for: file) }
+    }
     .opacity(file.isRemoved ? 0.5 : 1)
-    // Alongside the row's own tap (which selects in a sidebar), not instead of it.
+    // The kit row has no double-click of its own: opening the file rides alongside its tap.
     .simultaneousGesture(
       TapGesture(count: 2).onEnded {
         guard !priorityMode else { return }
         store.openFile(fileIndex: file.index, itemID: itemID)
-      }
-    ).simultaneousGesture(
-      TapGesture().onEnded {
-        guard priorityMode else { return }
-        togglePriority(for: file)
       }
     ).contextMenu { fileMenu(file) }
   }
@@ -517,7 +497,7 @@ private struct SingleFileRow: View {
           .frame(minWidth: 54, alignment: .trailing)
       }
       if !file.isDone {
-        DualProgressView(primary: file.sequentialBytes, secondary: file.verifiedBytes, total: file.length)
+        KitProgressBar(value: fraction(file.sequentialBytes), secondary: fraction(file.verifiedBytes))
           .opacity(file.isPaused ? 0.4 : 1)
       }
       Text(
@@ -526,23 +506,9 @@ private struct SingleFileRow: View {
     }.padding(.horizontal, 10).padding(.vertical, 7).opacity(file.isPaused ? 0.75 : 1)
   }
 
-  /// The sequential bytes (playable from the start) over the verified ones, which may run ahead. The kit's bars carry
-  /// one value; this one carries two.
-  struct DualProgressView: View {
-    let primary: Int64
-    let secondary: Int64
-    let total: Int64
-    var primaryProgress: Double { max(0, min(Double(primary) / Double(max(total, 1)), 1)) }
-    var secondaryProgress: Double { max(0, min(Double(secondary) / Double(max(total, 1)), 1)) }
-    var body: some View {
-      GeometryReader { view in
-        ZStack(alignment: .leading) {
-          Capsule().fill(.kitFill)
-          Capsule().fill(Hue.accent.soft(0.35)).frame(width: view.size.width * secondaryProgress)
-          Capsule().fill(.kitAccent).frame(width: view.size.width * primaryProgress)
-        }
-      }.frame(height: 4).animation(.kit, value: primary)
-    }
+  /// The sequential bytes (playable from the start) or the verified ones (which may run ahead) as a share of the file.
+  private func fraction(_ bytes: Int64) -> Double {
+    max(0, min(Double(bytes) / Double(max(file.length, 1)), 1))
   }
 }
 

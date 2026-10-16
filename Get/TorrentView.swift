@@ -399,14 +399,12 @@ private struct TorrentDetailView: View {
     .action {
       if priorityMode { togglePriority(for: file) }
     }
+    .onDoubleClick {
+      guard !priorityMode else { return }
+      store.openFile(fileIndex: file.index, itemID: itemID)
+    }
     .opacity(file.isRemoved ? 0.5 : 1)
-    // The kit row has no double-click of its own: opening the file rides alongside its tap.
-    .simultaneousGesture(
-      TapGesture(count: 2).onEnded {
-        guard !priorityMode else { return }
-        store.openFile(fileIndex: file.index, itemID: itemID)
-      }
-    ).contextMenu { fileMenu(file) }
+    .contextMenu { fileMenu(file) }
   }
 
   @ViewBuilder private func fileMenu(_ file: DownloadStore.DownloadFileItem) -> some View {

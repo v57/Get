@@ -1,4 +1,5 @@
 import AppKit
+import ComponentKit
 import SwiftUI
 import UpdateKit
 import os
@@ -10,10 +11,13 @@ import os
   /// once the user turns on automatic checks (never before), installed in place with a relaunch.
   private let updater = AppUpdater(github: "v57/Get", assetName: "Get.zip")
 
+  /// Get's red, the one colour the app picks.
+  static let accent = Color(red: 1, green: 0x3b / 255, blue: 0x30 / 255)
+
   init() { updater.start() }
 
   var body: some Scene {
-    WindowGroup { TorrentView() }
+    WindowGroup { TorrentView().componentKit(accent: Self.accent) }
       .commands { UpdaterCommands(updater: updater) }
   }
 }
@@ -48,4 +52,4 @@ import os
   }
 }
 
-#Preview { TorrentView() }
+#Preview { TorrentView().componentKit(accent: GetApp.accent) }

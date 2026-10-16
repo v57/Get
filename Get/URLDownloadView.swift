@@ -1,10 +1,11 @@
 import AppKit
+import ComponentKit
 import SwiftUI
 import Torrent
 import URLDownload
 
-/// Detail pane for a URL download: progress, speed, connections, source and
-/// checksum.
+/// Detail pane for a URL download: the transfer (progress, speed, connections, size) and the source (link, checksum,
+/// resume), each a card whose header sums it up.
 struct URLDownloadDetailView: View {
   let store: DownloadStore
   let itemID: String
@@ -14,93 +15,62 @@ struct URLDownloadDetailView: View {
   }
 
   var body: some View {
-    Form {
-      Section {
-        LabeledContent("Status") {
-          HStack(spacing: 4) {
-            Text(item.state.label)
-            if item.state == .downloading, item.connections > 1 {
-              Text("· \(item.connections) connections")
-            }
-            if !item.speed.isEmpty { Text("· \(item.speed)") }
-          }.monospacedDigit()
-        }
-        LabeledContent("Size") {
-          if let total = item.totalBytes {
-            Text(
-              "\(Text(item.receivedBytes, format: .byteCount(style: .file))) of \(Text(total, format: .byteCount(style: .file)))"
-            ).monospacedDigit()
-          } else {
-            Text(item.receivedBytes, format: .byteCount(style: .file)).monospacedDigit()
-          }
-        }
-        if item.totalBytes != nil {
-          ProgressView(value: item.progress)
-        } else if item.state == .downloading {
-          ProgressView().progressViewStyle(.linear)
-        }
+    ScrollView {
+      VStack(alignment: .leading, spacing: 18) {
         if let error = item.error {
-          Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+          Banner(
+            item.state.isFailed ? "Download failed" : "Connection trouble", message: error,
+            systemImage: "exclamationmark.triangle", hue: item.state.isFailed ? .red : .orange
+          ) {
+            if item.state.isFailed { Button("Retry") { store.retry(itemID: itemID) } }
+          }.textSelection(.enabled)
         }
-      }
-      Section {
-        if let source = item.sourceURL {
-          LabeledContent("Source") {
-            Text(source.absoluteString).lineLimit(3).truncationMode(.middle)
-              .textSelection(.enabled)
+        KitSection("Transfer", meta: transferMeta, systemImage: "arrow.down", status: item.workStatus) {
+          InspectorRow("Status", copyText: nil) { Text(status).monospacedDigit() }
+          InspectorRow("Size", copyText: nil) { Text(size).monospacedDigit() }
+        }
+        KitSection(
+          "Source", meta: item.sourceURL?.host() ?? "", systemImage: "link", hue: .teal
+        ) {
+          if let source = item.sourceURL {
+            InspectorRow("Source", value: source.absoluteString)
+          }
+          if let checksum = item.verifiedChecksum {
+            InspectorRow("Checksum", copyText: nil) {
+              Label("\(checksum.algorithm.rawValue) verified", systemImage: "checkmark.seal.fill")
+                .foregroundStyle(Hue.green.text)
+            }
+          } else if let checksum = item.checksum {
+            InspectorRow("Checksum", value: "\(checksum.algorithm.rawValue), checked when finished", copyable: false)
+          }
+          if item.state == .downloading || item.state == .paused, item.totalBytes != nil {
+            InspectorRow(
+              "Resume", value: item.resumable ? "Continues after interruptions" : "The server can't resume; restarts",
+              copyable: false)
           }
         }
-        if let checksum = item.verifiedChecksum {
-          LabeledContent("Checksum") {
-            Label("\(checksum.algorithm.rawValue) verified", systemImage: "checkmark.seal.fill")
-              .foregroundStyle(.green)
-          }
-        } else if let checksum = item.checksum {
-          LabeledContent("Checksum") {
-            Text("\(checksum.algorithm.rawValue), checked when finished")
-          }
-        }
-        if item.state == .downloading || item.state == .paused, item.totalBytes != nil {
-          LabeledContent("Resume") {
-            Text(item.resumable ? "Continues after interruptions" : "The server can't resume; restarts")
-          }
-        }
-      }
-    }.formStyle(.grouped).navigationTitle(item.title).toolbar {
-      LocationToolbar(store: store, item: item)
-      ToolbarItem(placement: .automatic) {
-        switch item.state {
-        case .downloading, .paused:
-          Button {
-            store.togglePause(itemID: itemID)
-          } label: {
-            Label(
-              item.state == .paused ? "Resume" : "Pause",
-              systemImage: item.state == .paused ? "play.fill" : "pause.fill")
-          }.help(item.state == .paused ? "Resume" : "Pause")
-        case .failed:
-          Button {
-            store.retry(itemID: itemID)
-          } label: {
-            Label("Retry", systemImage: "arrow.clockwise")
-          }.help("Try again from where it stopped")
-        default:
-          EmptyView()
-        }
-      }
-      ToolbarItem(placement: .automatic) {
-        if item.state != .stopped && item.state != .completed {
-          Button("Cancel", role: .destructive) { store.cancel(itemID: itemID) }
-        }
-      }
-      ToolbarItem(placement: .automatic) {
-        Button {
-          Task { await store.trash(itemID: itemID) }
-        } label: {
-          Image(systemName: "trash")
-        }.help("Move download to Trash")
-      }
-    }
+      }.frame(maxWidth: 680).frame(maxWidth: .infinity).padding(.horizontal, 24).padding(.vertical, 20)
+    }.kitPane(.secondary)
+  }
+
+  /// "Downloading · 4 connections · 3.2 MB/s".
+  private var status: String {
+    var parts = [item.state.label]
+    if item.state == .downloading, item.connections > 1 { parts.append("\(item.connections) connections") }
+    if !item.speed.isEmpty { parts.append(item.speed) }
+    return parts.joined(separator: " · ")
+  }
+
+  /// "38.9 MB of 48 MB", or what has arrived while the size is unknown.
+  private var size: String {
+    let received = item.receivedBytes.formatted(.byteCount(style: .file))
+    guard let total = item.totalBytes else { return received }
+    return "\(received) of \(total.formatted(.byteCount(style: .file)))"
+  }
+
+  /// "38.9 of 48 MB · 3.2 MB/s".
+  private var transferMeta: [String] {
+    [size, item.speed]
   }
 }
 
@@ -119,24 +89,36 @@ struct URLDownloadSheet: View {
   private var checksumInvalid: Bool {
     !checksumText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && checksum == nil
   }
+  private var linkInvalid: Bool {
+    !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && url == nil
+  }
 
   var body: some View {
-    Form {
-      TextField("URL", text: $link, prompt: Text("https://example.com/file.zip"))
-      TextField("Checksum", text: $checksumText, prompt: Text("Optional: SHA-256, SHA-1 or MD5"))
-      if checksumInvalid {
-        Text("Not a SHA-256, SHA-512, SHA-1 or MD5 checksum.").font(.caption)
-          .foregroundStyle(.red)
+    KitSheet(
+      title: "Download a Link",
+      meta: "An http(s) or magnet link. With a checksum, the finished file is checked against it.",
+      systemImage: "arrow.down", width: 480
+    ) {
+      FormCard {
+        FormRow(
+          "URL", systemImage: "link", hue: .blue, error: linkInvalid ? "Not an http(s) or magnet link" : nil,
+          field: TextField("URL", text: $link, prompt: Text("https://example.com/file.zip")))
+        FormRow(
+          "Checksum", systemImage: "key", hue: .gray,
+          error: checksumInvalid ? "Not a SHA-256, SHA-512, SHA-1 or MD5 checksum" : nil,
+          field: TextField("Checksum", text: $checksumText, prompt: Text("Optional: SHA-256, SHA-1 or MD5"))
+            .kitFont(.mono))
       }
-    }.formStyle(.grouped).frame(width: 480).fixedSize(horizontal: false, vertical: true).toolbar {
-      ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-      ToolbarItem(placement: .confirmationAction) {
-        Button("Download") {
-          guard let url else { return }
-          onDownload(url, checksum)
-          dismiss()
-        }.disabled(url == nil || checksumInvalid)
-      }
+    } footer: {
+      SheetStatus(
+        url.map(Self.name(of:)) ?? "Paste or type a link", systemImage: "doc",
+        status: url == nil ? .idle : .done)
+      Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+      Button("Download") {
+        guard let url else { return }
+        onDownload(url, checksum)
+        dismiss()
+      }.buttonStyle(.kitPrimary).keyboardShortcut(.defaultAction).disabled(url == nil || checksumInvalid)
     }.onAppear {
       // The screenshot demo shows a link of its own, never the clipboard.
       if ScreenshotDemo.isOn {
@@ -149,6 +131,16 @@ struct URLDownloadSheet: View {
         link = text.trimmingCharacters(in: .whitespacesAndNewlines)
       }
     }
+  }
+
+  /// What the link will be saved as: its last path component, or its host (a magnet's name when it has one).
+  private static func name(of url: URL) -> String {
+    if url.scheme?.lowercased() == "magnet" {
+      let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "dn" }?.value
+      return name ?? "Magnet link"
+    }
+    let last = url.lastPathComponent
+    return last.isEmpty || last == "/" ? (url.host() ?? url.absoluteString) : last
   }
 
   /// An http(s) or magnet link from typed or pasted text.

@@ -19,21 +19,21 @@ struct TorrentView: View {
   @State private var urlSheetIsUp = false
   /// The selected torrent's priority mode: clicking files numbers them 1–4.
   @State private var priorityMode = false
+  @State private var columns = NavigationSplitViewVisibility.all
 
   private var selected: DownloadStore.DownloadItem? {
     selectedID.flatMap { id in store.items.first { $0.id == id } }
   }
 
   var body: some View {
-    NavigationSplitView {
-      // The sidebar's own bottom bar has the toggle.
+    NavigationSplitView(columnVisibility: $columns) {
+      // The sidebar has its own toggle; the kit's toolbar brings a hidden sidebar back.
       sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 260).toolbar(removing: .sidebarToggle)
     } detail: {
       detail
+        .kitToolbar(selected?.title ?? "Get") { title } tools: { tools }
+        .kitSidebarToggle(columnVisibility: $columns)
     }
-    .toolbar { toolbar }
-    .navigationTitle(selected?.title ?? "Get")
-    .kitHidesSystemTitle()
     .kitDropTarget(isDropTargeted, cornerRadius: KitMetrics.radiusWindow)
     .overlay {
       if isDropTargeted {
@@ -108,52 +108,55 @@ struct TorrentView: View {
 
   // MARK: Toolbar
 
-  /// The rich title (the selected download, or every download summed up) and the tools in card groups.
-  @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-    KitToolbarItem(placement: .navigation) { title }
-    if #available(macOS 26, *) {
-      ToolbarSpacer(.flexible)
+  /// The rich title: the selected download, or every download summed up.
+  @ViewBuilder private var title: some View {
+    if let item = selected {
+      KitTitle(item.title, meta: item.metaParts, systemImage: "arrow.down", status: item.workStatus)
+    } else {
+      KitTitle("Get", meta: store.summaryParts, systemImage: "arrow.down", status: store.overallStatus)
     }
-    KitToolbarItem(placement: .primaryAction) { tools }
   }
 
-  private var title: some View {
-    Group {
-      if let item = selected {
-        KitTitle(item.title, meta: item.metaParts, systemImage: "arrow.down", status: item.workStatus)
-      } else {
-        KitTitle("Get", meta: store.summaryParts, systemImage: "arrow.down", status: store.overallStatus)
-      }
-    }.padding(.leading, 6)
-  }
-
-  private var tools: some View {
-    HStack(spacing: KitMetrics.gutter) {
+  /// The tools in card groups. As the window narrows they go icon-only, then fold into "…": adding first (the
+  /// sidebar has both), then Show in Finder and Open; the download's own actions and Trash stay out.
+  @ToolbarSlotBuilder private var tools: [ToolbarSlot] {
+    ToolbarSlot(priority: 0) {
       ToolGroup(iconOnly: true) {
         Button("Open a .torrent file", systemImage: "plus") { showImporter = true }
           .help("Open a .torrent file")
         Button("Download a link", systemImage: "link") { showURLSheet = true }
           .help("Download a link")
       }
-      if let item = selected {
-        let onDisk = store.existingLocation(itemID: item.id) != nil
+    } menu: {
+      Button("Open a .torrent File…", systemImage: "plus") { showImporter = true }
+      Button("Download a Link…", systemImage: "link") { showURLSheet = true }
+    }
+    if let item = selected {
+      let onDisk = store.existingLocation(itemID: item.id) != nil
+      ToolbarSlot(priority: 1) {
         ToolGroup(iconOnly: true) {
-          Button("Show in Finder", systemImage: "folder") { store.reveal(itemID: item.id) }
-            .help("Show in Finder").disabled(!onDisk)
-          if item.isSingleFile {
-            Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
-              .help("Open in its default app").disabled(!onDisk)
-          }
+          fileActions(item, onDisk: onDisk)
         }
-        if item.isActive || canSetPriority(item) {
-          ToolGroup {
-            itemActions(item)
-          }
-        }
-        Button("Move download to Trash", systemImage: "trash", role: .destructive) {
-          Task { await store.trash(itemID: item.id) }
-        }.buttonStyle(.kitRound).help("Move download to Trash")
+      } menu: {
+        fileActions(item, onDisk: onDisk)
       }
+      if item.isActive || canSetPriority(item) {
+        ToolGroup {
+          itemActions(item)
+        }
+      }
+      Button("Move download to Trash", systemImage: "trash", role: .destructive) {
+        Task { await store.trash(itemID: item.id) }
+      }.buttonStyle(.kitRound).help("Move download to Trash")
+    }
+  }
+
+  @ViewBuilder private func fileActions(_ item: DownloadStore.DownloadItem, onDisk: Bool) -> some View {
+    Button("Show in Finder", systemImage: "folder") { store.reveal(itemID: item.id) }
+      .help("Show in Finder").disabled(!onDisk)
+    if item.isSingleFile {
+      Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
+        .help("Open in its default app").disabled(!onDisk)
     }
   }
 
@@ -165,7 +168,7 @@ struct TorrentView: View {
           // Entering the mode clears all priorities; leaving it keeps the assigned ones.
           if !priorityMode { store.clearAllPriorities(itemID: item.id) }
           priorityMode.toggle()
-        }.help("Assign file download priority (1–4)")
+        }.kitToolOn(priorityMode).help("Assign file download priority (1–4)")
       }
     case .url:
       switch item.state {
@@ -195,7 +198,9 @@ struct TorrentView: View {
   // MARK: Sidebar
 
   private var sidebar: some View {
-    KitSidebar(selection: $selectedID, searchText: $search, searchPrompt: "Search Downloads") {
+    KitSidebar(
+      selection: $selectedID, searchText: $search, searchPrompt: "Search Downloads", columnVisibility: $columns
+    ) {
       KitSection(
         "Downloads", meta: store.sectionMeta, systemImage: "arrow.down", status: store.overallStatus
       ) {

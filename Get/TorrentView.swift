@@ -282,14 +282,19 @@ private struct DownloadRow: View {
       action
     }
     .progress(item.showsBar ? item.progress : nil)
-    .contextMenu {
-      if item.isSingleFile { Button("Open") { onOpen() } }
-      Button("Show in Finder") { onReveal() }
+    .kitContextMenu {
+      if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
+      Button("Show in Finder", systemImage: "folder") { onReveal() }
       Divider()
       if item.state == .downloading || item.state == .paused {
-        Button(item.state == .paused ? "Resume" : "Pause") { onTogglePause() }
+        Button(
+          item.state == .paused ? "Resume" : "Pause", systemImage: item.state == .paused ? "play" : "pause"
+        ) { onTogglePause() }
       }
-      Button("Move to Trash", role: .destructive) { onTrash() }
+      if item.state.isFailed && item.kind == .url {
+        Button("Retry", systemImage: "arrow.clockwise") { onRetry() }
+      }
+      Button("Move to Trash", systemImage: "trash", role: .destructive) { onTrash() }
     }
   }
 
@@ -331,7 +336,7 @@ private struct TorrentDetailView: View {
         if item.files.count == 1, let file = item.files.first {
           SingleFileRow(
             file: file, onTogglePause: { store.toggleFilePaused(fileIndex: file.index, itemID: itemID) }
-          ).contextMenu { fileMenu(file) }
+          ).kitContextMenu { fileMenu(file) }
         } else {
           ForEach(FileGroup.groups(of: item)) { group in
             groupCard(group)
@@ -409,32 +414,38 @@ private struct TorrentDetailView: View {
       store.openFile(fileIndex: file.index, itemID: itemID)
     }
     .opacity(file.isRemoved ? 0.5 : 1)
-    .contextMenu { fileMenu(file) }
+    .kitContextMenu { fileMenu(file) }
   }
 
   @ViewBuilder private func fileMenu(_ file: DownloadStore.DownloadFileItem) -> some View {
     let onDisk = store.existingFileURL(fileIndex: file.index, itemID: itemID) != nil
-    Button("Open") { store.openFile(fileIndex: file.index, itemID: itemID) }.disabled(!onDisk)
-    Button("Show in Finder") { store.revealFile(fileIndex: file.index, itemID: itemID) }.disabled(!onDisk)
+    Button("Open", systemImage: "arrow.up.forward.app") { store.openFile(fileIndex: file.index, itemID: itemID) }
+      .disabled(!onDisk)
+    Button("Show in Finder", systemImage: "folder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
+      .disabled(!onDisk)
     Divider()
     if file.isRemoved {
-      Button("Restore File") { store.restoreFile(fileIndex: file.index, itemID: itemID) }
+      Button("Restore File", systemImage: "arrow.uturn.backward") {
+        store.restoreFile(fileIndex: file.index, itemID: itemID)
+      }
     } else if !file.isDone {
-      Button(file.isPaused ? "Resume File" : "Pause File") {
+      Button(file.isPaused ? "Resume File" : "Pause File", systemImage: file.isPaused ? "play" : "pause") {
         store.toggleFilePaused(fileIndex: file.index, itemID: itemID)
       }
       // Trash a paused file to remove it from the download.
       if file.isPaused {
-        Button("Remove File", role: .destructive) { store.removeFile(fileIndex: file.index, itemID: itemID) }
+        Button("Remove File", systemImage: "trash", role: .destructive) {
+          store.removeFile(fileIndex: file.index, itemID: itemID)
+        }
       }
     }
     // Restrict the download to this file (or this file and every file
     // after it): every other file that isn't fully downloaded is
     // paused and trashed.
     if item.files.count > 1 {
-      Menu("Download") {
-        Button("Only this") { store.downloadOnly(fileIndex: file.index, itemID: itemID) }
-        Button("Only this and after") {
+      KitSubmenu("Download", systemImage: "arrow.down") {
+        Button("Only This") { store.downloadOnly(fileIndex: file.index, itemID: itemID) }
+        Button("Only This and After") {
           store.downloadOnly(fileIndex: file.index, itemID: itemID, andAfter: true)
         }
       }

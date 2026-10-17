@@ -266,7 +266,8 @@ struct TorrentView: View {
 }
 
 /// A sidebar row: the title, one status line, the progress bar under them while there is work left, and one small
-/// action (pause, resume, retry, or Show in Finder once it's done).
+/// action (pause, resume, retry, or Show in Finder once it's done). A download that finishes drops in; one that
+/// fails shakes.
 private struct DownloadRow: View {
   let item: DownloadStore.DownloadItem
   let onTogglePause: () -> Void
@@ -274,6 +275,8 @@ private struct DownloadRow: View {
   let onOpen: () -> Void
   let onReveal: () -> Void
   let onRetry: () -> Void
+  @State private var finishes = 0
+  @State private var failures = 0
 
   var body: some View {
     SidebarRow(value: item.id, item.title, subtitle: item.rowStatus) {
@@ -282,6 +285,12 @@ private struct DownloadRow: View {
       action
     }
     .progress(item.showsBar ? item.progress : nil)
+    .effect(.receive("arrow.down.circle.fill"), on: finishes)
+    .effect(.failure, on: failures)
+    .onChange(of: item.state) { old, new in
+      if new == .completed, old != .completed { finishes += 1 }
+      if new.isFailed, !old.isFailed { failures += 1 }
+    }
     .kitContextMenu {
       if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
       Button("Show in Finder", systemImage: "folder") { onReveal() }

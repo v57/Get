@@ -606,9 +606,11 @@ extension DownloadStore.DownloadItem {
   var isActive: Bool { state != .stopped && state != .completed && !state.isFailed }
 
   /// The work for live icons: the ring carries the progress, gray while paused, green once done, red when it failed.
+  /// Before there is any progress to show (a link of unknown size, a torrent still finding peers) the live icon wears
+  /// the work indicator instead of an empty ring.
   var workStatus: WorkStatus {
     switch state {
-    case .downloading, .checking: .working(progress: kind == .url && totalBytes == nil ? nil : progress)
+    case .downloading, .checking: .working(progress: hasProgress ? progress : nil)
     case .paused: .paused(progress: progress)
     case .completed: .done
     case .failed(let message): .failed(message)
@@ -630,6 +632,9 @@ extension DownloadStore.DownloadItem {
     let parts = state == .downloading ? ["\(Int(progress * 100))%", speed] : metaParts
     return parts.filter { !$0.isEmpty }.joined(separator: " · ")
   }
+
+  /// Whether there is a share to show: a link's size is known, a torrent has verified some of its data.
+  var hasProgress: Bool { kind == .url ? totalBytes != nil : progress > 0 || state == .checking }
 
   /// A bar while there is work left; finished, stopped and failed downloads drop theirs.
   var showsBar: Bool { state == .downloading || state == .paused || state == .checking }

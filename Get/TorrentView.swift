@@ -331,7 +331,8 @@ private struct TorrentDetailView: View {
 
   var body: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: KitMetrics.gutter) {
+      // A folder card can hold hundreds of files: the cards and their rows are built as they near the screen.
+      KitLazyStack(alignment: .leading, spacing: KitMetrics.gutter) {
         header
         if item.files.count == 1, let file = item.files.first {
           SingleFileRow(

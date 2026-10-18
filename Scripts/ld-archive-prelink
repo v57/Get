@@ -1,0 +1,33 @@
+#!/bin/zsh
+# A copy of ../Dev/Dev/Release/ld-archive-prelink (Dev's release.sh uses that one); change both together.
+# The linker for release archives (ALTERNATE_LINKER_PATH), so dead stripping reaches into Swift packages.
+#
+# Xcode pre-links each Swift package target into one relocatable object (`ld -r`), and everything in such an
+# object stays in the app, used or not: ComponentKit was 3 of Player's 4.6 MB. For those links this writes a
+# static archive of the inputs instead, so the app's final link (LTO with `-internalize-at-link` and
+# `-conditional-runtime-records`) can drop what nothing uses. Every other link goes to the real ld unchanged.
+real_ld=$(xcrun -f ld)
+
+if (( ${argv[(Ie)-r]} )); then
+  out= deps= inputs=()
+  for (( i = 1; i <= $#; i++ )); do
+    case ${argv[i]} in
+      -o) out=${argv[++i]} ;;
+      -dependency_info) deps=${argv[++i]} ;;
+      -filelist) inputs+=(${(f)"$(<${argv[++i]%%,*})"}) ;;
+      -platform_version) (( i += 3 )) ;;
+      -arch|-syslibroot|-L|-F|-object_path_lto|-map|-sectcreate|-exported_symbols_list) (( i++ )) ;;
+      -*) ;;
+      *.o|*.bc|*.a) inputs+=(${argv[i]}) ;;
+    esac
+  done
+  [[ -n $out && ${#inputs} -gt 0 ]] || exec $real_ld "$@"
+  rm -f $out
+  xcrun libtool -static -no_warning_for_no_symbols -o $out $inputs || exit $?
+  # Xcode reads ld's dependency info: a version record, then the inputs (0x10) and the output (0x40).
+  if [[ -n $deps ]]; then
+    { printf '\x00ld-archive-prelink\x00'; for f in $inputs; do printf '\x10%s\x00' $f; done; printf '\x40%s\x00' $out } > $deps
+  fi
+  exit 0
+fi
+exec $real_ld "$@"

@@ -27,6 +27,8 @@ mkdir -p $out
 echo "Archiving…"
 xcodebuild -project Get.xcodeproj -scheme Get -configuration Release \
   -destination 'generic/platform=macOS' -archivePath $out/Get.xcarchive \
+  SWIFT_LTO=YES ALTERNATE_LINKER_PATH=$PWD/Scripts/ld-archive-prelink \
+  'OTHER_SWIFT_FLAGS=$(inherited) -Xfrontend -internalize-at-link -Xfrontend -conditional-runtime-records' \
   DEVELOPMENT_TEAM=$team archive -quiet
 
 cat > $out/export.plist <<PLIST

@@ -1,4 +1,4 @@
-import AppKit
+import ComponentKit
 import CryptoKit
 import Foundation
 import GetKit
@@ -717,10 +717,10 @@ import os
     return FileManager.default.fileExists(atPath: url.path) ? url : nil
   }
 
-  /// Show the download in Finder, selected in its folder.
+  /// Show the download in the file manager, selected in its folder.
   func reveal(itemID: String) {
     guard let url = existingLocation(itemID: itemID) else { return }
-    NSWorkspace.shared.activateFileViewerSelecting([url])
+    KitDesktop.reveal([url])
   }
 
   /// Open a single-file download in its default app. Works while it is
@@ -729,17 +729,17 @@ import os
     guard items.first(where: { $0.id == itemID })?.isSingleFile == true,
       let url = existingLocation(itemID: itemID)
     else { return }
-    NSWorkspace.shared.open(url)
+    KitDesktop.open(url)
   }
 
   func revealFile(fileIndex: Int, itemID: String) {
     guard let url = existingFileURL(fileIndex: fileIndex, itemID: itemID) else { return }
-    NSWorkspace.shared.activateFileViewerSelecting([url])
+    KitDesktop.reveal([url])
   }
 
   func openFile(fileIndex: Int, itemID: String) {
     guard let url = existingFileURL(fileIndex: fileIndex, itemID: itemID) else { return }
-    NSWorkspace.shared.open(url)
+    KitDesktop.open(url)
   }
 
   // MARK: - Persistence (resume on relaunch)

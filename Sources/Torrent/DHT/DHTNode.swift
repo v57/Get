@@ -1,6 +1,10 @@
 import CryptoKit
 import Foundation
 
+#if os(Windows)
+  import WinSDK
+#endif
+
 /// Thrown by DHT operations.
 public enum DHTError: Error, Equatable, Sendable {
   case socket(String)
@@ -25,7 +29,7 @@ public final class DHTNode: @unchecked Sendable {
     ("dht.transmissionbt.com", 6881),
   ]
 
-  private let fd: Int32
+  private let fd: DHTDescriptor
   private let lock = NSLock()
   private var pending: [String: CheckedContinuation<(Data, String, UInt16), Error>] = [:]
   private var stopped = false
@@ -33,29 +37,14 @@ public final class DHTNode: @unchecked Sendable {
 
   /// Create a node bound to an ephemeral local UDP port.
   public init() throws {
-    let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
-    guard fd >= 0 else { throw DHTError.socket("socket(): \(errno)") }
-    var addr = sockaddr_in()
-    addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_port = 0
-    addr.sin_addr.s_addr = INADDR_ANY
-    let rc = withUnsafePointer(to: &addr) { ptr in
-      ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-      }
-    }
-    guard rc == 0 else {
-      Darwin.close(fd)
-      throw DHTError.socket("bind(): \(errno)")
-    }
-    self.fd = fd
+    self.fd = try DHTSocket.bindAny()
     self.nodeID = Self.makeNodeID()
     self.routing = RoutingTable(ownID: nodeID)
     startReceiver()
   }
 
   /// Injectable for tests: construct over an existing bound fd + fixed node id.
-  init(fd: Int32, nodeID: Data) {
+  init(fd: DHTDescriptor, nodeID: Data) {
     self.fd = fd
     self.nodeID = nodeID
     self.routing = RoutingTable(ownID: nodeID)
@@ -82,42 +71,22 @@ public final class DHTNode: @unchecked Sendable {
     }) {
       return
     }
-    Darwin.shutdown(fd, SHUT_RDWR)
-    Darwin.close(fd)
+    DHTSocket.close(fd)
   }
 
   // MARK: - Receiver
 
   private func receiverLoop() {
-    var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
     while true {
       if locked({ stopped }) { return }
-      let rc = Darwin.poll(&pfd, 1, 200)
+      let rc = DHTSocket.waitReadable(fd, milliseconds: 200)
       if rc < 0 {
         if locked({ stopped }) { return }
         continue
       }
       if rc == 0 { continue }
-      if pfd.revents & Int16(POLLIN) != 0 {
-        if let (data, host, port) = recvFrom() { handleDatagram(data, host: host, port: port) }
-      }
+      if let (data, host, port) = DHTSocket.receive(fd) { handleDatagram(data, host: host, port: port) }
     }
-  }
-
-  private func recvFrom() -> (Data, String, UInt16)? {
-    var buf = [UInt8](repeating: 0, count: 65535)
-    var from = sockaddr_in()
-    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let n = withUnsafeMutablePointer(to: &from) { ptr in
-      ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        Darwin.recvfrom(fd, &buf, buf.count, 0, $0, &len)
-      }
-    }
-    guard n > 0 else { return nil }
-    let data = Data(buf.prefix(n))
-    let host = String(cString: inet_ntoa(from.sin_addr))
-    let port = UInt16(bigEndian: UInt16(from.sin_port).byteSwapped)
-    return (data, host, port)
   }
 
   private func handleDatagram(_ data: Data, host: String, port: UInt16) {
@@ -328,40 +297,11 @@ public final class DHTNode: @unchecked Sendable {
   }
 
   private func sendDatagram(_ data: Data, to endpoint: sockaddr_in) {
-    var ep = endpoint
-    data.withUnsafeBytes { raw in
-      withUnsafePointer(to: &ep) { ptr in
-        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-          _ = Darwin.sendto(
-            fd, raw.baseAddress, data.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-        }
-      }
-    }
+    DHTSocket.send(fd, data, to: endpoint)
   }
 
   private func resolve(_ host: String, port: UInt16) -> sockaddr_in? {
-    var addr = sockaddr_in()
-    addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_port = in_port_t(port).bigEndian
-    // Direct dotted-quad IP first.
-    if host.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 { return addr }
-    // Fall back to DNS for hostnames (e.g. bootstrap routers) via
-    // getaddrinfo, which returns a properly-aligned sockaddr.
-    var hints = addrinfo()
-    hints.ai_family = AF_INET
-    hints.ai_socktype = SOCK_DGRAM
-    var result: UnsafeMutablePointer<addrinfo>?
-    let service = String(port)
-    let rc = host.withCString { h in service.withCString { s in getaddrinfo(h, s, &hints, &result) }
-    }
-    guard rc == 0, let ai = result, let sa = ai.pointee.ai_addr else {
-      if result != nil { freeaddrinfo(result) }
-      return nil
-    }
-    var out = sockaddr_in()
-    memcpy(&out, sa, MemoryLayout<sockaddr_in>.size)
-    freeaddrinfo(result)
-    return out
+    DHTSocket.resolve(host, port: port)
   }
 
   private func locked<T>(_ body: () -> T) -> T {

@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Darwin
 
 /// The fakes write over raw POSIX sockets; when a session cancels or pauses
@@ -7,3 +9,4 @@ import Darwin
 /// socket fake touches this in its initializer, so a test run alone is as safe
 /// as one that happens to follow another (static lets are lazy).
 enum SocketSignalSetup { static let installed: Void = { signal(SIGPIPE, SIG_IGN) }() }
+#endif

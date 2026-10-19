@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Foundation
 
 @testable import Torrent
@@ -264,3 +266,4 @@ private final class StopFlag: @unchecked Sendable {
 /// Weak reference to the tracker for the receive thread (breaks the
 /// thread → tracker → thread retain cycle).
 private final class TrackerBox: @unchecked Sendable { weak var tracker: FakeUDPTracker? }
+#endif

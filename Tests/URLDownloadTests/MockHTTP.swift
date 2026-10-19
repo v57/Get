@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 /// An in-process HTTP server for URL download tests: a `URLProtocol` that
 /// serves registered resources under `https://mock.test/<path>`, with byte
 /// ranges, `If-Range`, injected failures and request logging. No sockets, so
@@ -117,8 +121,10 @@ final class MockHTTP: URLProtocol, @unchecked Sendable {
       // Drop the connection a moment later, as a network would: failing in
       // the same breath makes URLSession discard the bytes still queued for
       // the delegate.
+      // (swift-corelibs-foundation marks URLProtocol as not Sendable.)
+      nonisolated(unsafe) let this = self
       DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) {
-        self.client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+        this.client?.urlProtocol(this, didFailWithError: URLError(.networkConnectionLost))
       }
     } else {
       client?.urlProtocolDidFinishLoading(self)

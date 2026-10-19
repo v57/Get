@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Foundation
 import Testing
 
@@ -101,3 +103,4 @@ private let fakePeerID = hex("2d46414b455f504545522d303030303030303031")
   try await connection.close()
   _ = try await fake.waitForResult()
 }
+#endif

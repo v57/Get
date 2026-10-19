@@ -41,3 +41,35 @@ let package = Package(
       name: "URLDownloadTests", dependencies: ["URLDownload"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
   ])
+
+#if os(Windows) || os(Linux)
+// Off Apple platforms the frameworks the libraries import (CryptoKit, Network, os) are v57/SwiftUI's stand-ins.
+package.dependencies += [v57("SwiftUI")]
+let standIns: [Target.Dependency] = ["CryptoKit", "Network", "os"].map { .product(name: $0, package: "SwiftUI") }
+for target in package.targets where ["GetKit", "Torrent", "URLDownload"].contains(target.name) {
+  target.dependencies += standIns
+}
+#if os(Windows)
+// The app: a DLL the SwiftUI WinUI host loads (SwiftUI's Windows/scripts/build-app.ps1 -PackagePath <this package>
+// -Product GetWinUI), built from the Xcode project's sources with its settings.
+package.dependencies += [v57("Component"), v57("UpdateKit"), v57("Dev")]
+package.targets.append(
+  .target(
+    name: "GetApp",
+    dependencies: [
+      "GetKit", "Torrent", "URLDownload", .product(name: "SwiftUI", package: "SwiftUI"),
+      .product(name: "ComponentKit", package: "Component"), .product(name: "UpdateKit", package: "UpdateKit"),
+      .product(name: "DevScreenshots", package: "Dev"),
+    ] + standIns,
+    path: "Get", exclude: ["Info.plist", "Assets.xcassets"],
+    swiftSettings: [
+      .swiftLanguageMode(.v5), .defaultIsolation(MainActor.self), .enableUpcomingFeature("ApproachableConcurrency"),
+      .enableUpcomingFeature("MemberImportVisibility"),
+      // On Apple platforms `import Foundation` brings Combine (ObservableObject, @Published), URLSession and the
+      // file APIs SwiftUIPortability adds (trash, security-scoped URLs) along: every file gets them here too.
+      .unsafeFlags(
+        ["Combine", "FoundationNetworking", "SwiftUIPortability"].flatMap { ["-Xfrontend", "-import-module", "-Xfrontend", $0] }),
+    ]))
+package.products.append(.library(name: "GetWinUI", type: .dynamic, targets: ["GetApp"]))
+#endif
+#endif

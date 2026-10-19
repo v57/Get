@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Foundation
 
 @testable import Torrent
@@ -346,3 +348,4 @@ final class WirePeerStopFlag: @unchecked Sendable {
 /// Weak reference to the peer for the accept thread (breaks the
 /// thread → peer → thread retain cycle).
 private final class WirePeerBox: @unchecked Sendable { weak var peer: FakeWirePeer? }
+#endif

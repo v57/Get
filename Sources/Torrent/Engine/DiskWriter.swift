@@ -53,18 +53,23 @@ public actor DiskWriter {
       if removedFiles.contains(index) { continue }
       try FileManager.default.createDirectory(
         at: entry.url.deletingLastPathComponent(), withIntermediateDirectories: true)
-      let fd = open(entry.url.path, O_CREAT | O_RDWR, 0o644)
-      guard fd >= 0 else {
+      if !FileManager.default.fileExists(atPath: entry.url.path),
+        !FileManager.default.createFile(atPath: entry.url.path, contents: nil)
+      {
         throw DiskWriterError.io("open failed for \(entry.url.path): \(errnoText())")
       }
-      defer { Darwin.close(fd) }
       // Multi-file downloads must not reserve space for files the user may
       // not want (e.g. a file they'll remove). Create the file empty and let
       // it grow as pieces land. Single-file downloads still preallocate so
-      // unwritten regions read back as zeros.
+      // unwritten regions read back as zeros (ftruncate: sparse where the file
+      // system can).
       guard !layout.isMultiFile else { continue }
-      guard ftruncate(fd, entry.length) == 0 else {
-        throw DiskWriterError.io("ftruncate failed for \(entry.url.path): \(errnoText())")
+      do {
+        let handle = try FileHandle(forUpdating: entry.url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: UInt64(entry.length))
+      } catch {
+        throw DiskWriterError.io("ftruncate failed for \(entry.url.path): \(error.localizedDescription)")
       }
     }
   }
@@ -174,19 +179,30 @@ public actor DiskWriter {
     for span in spans {
       let handle = try fileHandle(for: span.file, createIfMissing: false)
       handle.seek(toFileOffset: UInt64(span.offset))
-      let fd = handle.fileDescriptor
       var remaining = span.length
-      while remaining > 0 {
-        let n = min(remaining, chunkSize)
-        let count = buffer.withUnsafeMutableBytes { p -> Int in
-          Darwin.read(fd, p.baseAddress, n)
+      #if canImport(Darwin)
+        let fd = handle.fileDescriptor
+        while remaining > 0 {
+          let n = min(remaining, chunkSize)
+          let count = buffer.withUnsafeMutableBytes { p -> Int in
+            Darwin.read(fd, p.baseAddress, n)
+          }
+          guard count > 0 else {
+            throw DiskWriterError.io("read failed for \(entryURL(span.file)) at \(span.offset)")
+          }
+          hasher.update(data: buffer[0..<count])
+          remaining -= count
         }
-        guard count > 0 else {
-          throw DiskWriterError.io("read failed for \(entryURL(span.file)) at \(span.offset)")
+      #else
+        // Windows has no file descriptor behind a FileHandle: read through it.
+        while remaining > 0 {
+          guard let chunk = try handle.read(upToCount: min(remaining, chunkSize)), !chunk.isEmpty else {
+            throw DiskWriterError.io("read failed for \(entryURL(span.file)) at \(span.offset)")
+          }
+          hasher.update(data: chunk)
+          remaining -= chunk.count
         }
-        hasher.update(data: buffer[0..<count])
-        remaining -= count
-      }
+      #endif
     }
     return Data(hasher.finalize())
   }

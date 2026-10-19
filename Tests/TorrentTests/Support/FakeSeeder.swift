@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Foundation
 
 @testable import Torrent
@@ -264,3 +266,4 @@ enum FakeSeederError: Error {
 /// Weak reference to the seeder for the accept thread (breaks the
 /// thread → seeder → thread retain cycle).
 private final class SeederBox: @unchecked Sendable { weak var seeder: FakeSeeder? }
+#endif

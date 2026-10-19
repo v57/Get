@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Foundation
 import Testing
 
@@ -163,3 +165,4 @@ import Testing
     try await HTTPTracker.announce(url: tracker.url, params: params, timeout: .seconds(5))
   }
 }
+#endif

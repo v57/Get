@@ -1,4 +1,8 @@
 import Foundation
+
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
 import Network
 
 /// Parameters for a tracker announce (BEP 3).

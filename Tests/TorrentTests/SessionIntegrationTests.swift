@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Foundation
 import Testing
 
@@ -794,3 +796,4 @@ private func waitForState(
   }
   #expect(requested.sorted() == [0, 1, 2, 3, 4, 5])
 }
+#endif

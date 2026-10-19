@@ -152,8 +152,8 @@ struct TorrentView: View {
   }
 
   @ViewBuilder private func fileActions(_ item: DownloadStore.DownloadItem, onDisk: Bool) -> some View {
-    Button("Show in Finder", systemImage: "folder") { store.reveal(itemID: item.id) }
-      .help("Show in Finder").disabled(!onDisk)
+    Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.reveal(itemID: item.id) }
+      .help("Show in \(KitDesktop.fileManagerName)").disabled(!onDisk)
     if item.isSingleFile {
       Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
         .help("Open in its default app").disabled(!onDisk)
@@ -293,7 +293,7 @@ private struct DownloadRow: View {
     }
     .kitContextMenu {
       if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
-      Button("Show in Finder", systemImage: "folder") { onReveal() }
+      Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { onReveal() }
       Divider()
       if item.state == .downloading || item.state == .paused {
         Button(
@@ -318,7 +318,7 @@ private struct DownloadRow: View {
       Button("Retry", systemImage: "arrow.clockwise", action: onRetry).buttonStyle(.kitIcon).help("Retry")
     case .completed:
       Button("Show in Finder", systemImage: "folder", action: onReveal).buttonStyle(.kitIcon)
-        .help("Show in Finder")
+        .help("Show in \(KitDesktop.fileManagerName)")
     default:
       EmptyView()
     }
@@ -431,7 +431,7 @@ private struct TorrentDetailView: View {
     let onDisk = store.existingFileURL(fileIndex: file.index, itemID: itemID) != nil
     Button("Open", systemImage: "arrow.up.forward.app") { store.openFile(fileIndex: file.index, itemID: itemID) }
       .disabled(!onDisk)
-    Button("Show in Finder", systemImage: "folder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
+    Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
       .disabled(!onDisk)
     Divider()
     if file.isRemoved {

@@ -1,5 +1,9 @@
 import GetKit
 import Foundation
+
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
 import os
 
 public enum URLDownloadState: Sendable, Equatable {

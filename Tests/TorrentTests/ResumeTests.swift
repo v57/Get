@@ -1,3 +1,5 @@
+// Darwin sockets: the fake peers and trackers (and the suites over them) build on Apple platforms.
+#if canImport(Darwin)
 import Darwin
 import Foundation
 import Testing
@@ -439,3 +441,4 @@ private func grabDeadPort() -> UInt16 {
   #expect(try Data(contentsOf: dir.appendingPathComponent("relaunch/a.bin")) == fileA)
   #expect(try Data(contentsOf: dir.appendingPathComponent("relaunch/b.bin")) == fileB)
 }
+#endif

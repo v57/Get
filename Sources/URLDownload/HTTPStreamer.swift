@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 /// Streams HTTP responses as they arrive: the response head, then each body
 /// chunk, so a download writes data to disk as it comes instead of buffering
 /// whole bodies (`URLSession.data`) or iterating byte by byte

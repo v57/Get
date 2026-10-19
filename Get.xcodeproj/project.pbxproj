@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		263FBE523031C505008DB220 /* Torrent in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE513031C505008DB220 /* Torrent */; };
 		263FBE543031C505008DB220 /* URLDownload in Frameworks */ = {isa = PBXBuildFile; productRef = 263FBE533031C505008DB220 /* URLDownload */; };
+		D5C0DE00000000000000000B /* GetKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE00000000000000000A /* GetKit */; };
 		D5C0DE000000000000000003 /* UpdateKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000002 /* UpdateKit */; };
 		D5C0DE000000000000000006 /* DevScreenshots in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000005 /* DevScreenshots */; };
 		D5C0DE000000000000000009 /* ComponentKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000008 /* ComponentKit */; };
@@ -32,6 +33,7 @@
 			files = (
 				263FBE523031C505008DB220 /* Torrent in Frameworks */,
 				263FBE543031C505008DB220 /* URLDownload in Frameworks */,
+				D5C0DE00000000000000000B /* GetKit in Frameworks */,
 				D5C0DE000000000000000003 /* UpdateKit in Frameworks */,
 				D5C0DE000000000000000006 /* DevScreenshots in Frameworks */,
 				D5C0DE000000000000000009 /* ComponentKit in Frameworks */,
@@ -76,6 +78,7 @@
 			packageProductDependencies = (
 				263FBE513031C505008DB220 /* Torrent */,
 				263FBE533031C505008DB220 /* URLDownload */,
+				D5C0DE00000000000000000A /* GetKit */,
 				D5C0DE000000000000000002 /* UpdateKit */,
 				D5C0DE000000000000000005 /* DevScreenshots */,
 				D5C0DE000000000000000008 /* ComponentKit */,
@@ -418,6 +421,10 @@
 		263FBE533031C505008DB220 /* URLDownload */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = URLDownload;
+		};
+		D5C0DE00000000000000000A /* GetKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GetKit;
 		};
 		D5C0DE000000000000000002 /* UpdateKit */ = {
 			isa = XCSwiftPackageProductDependency;

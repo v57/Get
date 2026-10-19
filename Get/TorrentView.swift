@@ -618,13 +618,21 @@ extension DownloadStore.DownloadItem {
     }
   }
 
-  /// The toolbar title's meta: "Downloading · 18.4 MB/s · 62%".
+  /// The toolbar title's meta: "Downloading · 18.4 MB/s · 62% · 3 min left".
   var metaParts: [String] {
     switch state {
     case .completed: [state.label, totalLength.map { $0.formatted(.byteCount(style: .file)) } ?? ""]
     case .failed, .stopped: [state.label]
-    default: [state.label, speed, "\(Int(progress * 100))%"]
+    default: [state.label, speed, "\(Int(progress * 100))%", timeLeft]
     }
+  }
+
+  /// "3 min left", "1 hr, 20 min left", while the time left is known.
+  var timeLeft: String {
+    guard let remaining, state == .downloading || state == .checking else { return "" }
+    let left = Duration.seconds(max(1, remaining)).formatted(
+      .units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: remaining >= 3600 ? 2 : 1))
+    return "\(left) left"
   }
 
   /// The sidebar row's status line: "62% · 18.4 MB/s", "Paused · 14%", "Completed · 784 MB".

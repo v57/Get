@@ -279,6 +279,8 @@ private func rangeHeaders(_ path: String) -> [String] {
 
   #expect(result.finalState == .completed)
   #expect(result.verified == Checksum(sha256(data)))
+  // The stats name the check ahead, so the app can plan its progress.
+  #expect(result.lastStats?.checksum == Checksum(sha256(data)))
 }
 
 @Test func parsesPastedChecksums() {

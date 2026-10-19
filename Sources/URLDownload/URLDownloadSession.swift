@@ -22,6 +22,8 @@ public struct URLDownloadStats: Sendable, Equatable {
   public var connections = 0
   /// The server accepts range requests: segmented, and resumable.
   public var resumable = false
+  /// What the finished file will be checked against (the user's checksum, else the server's), once known.
+  public var checksum: Checksum?
 
   public init() {}
 
@@ -112,6 +114,7 @@ public actor URLDownloadSession {
     stats.totalBytes = record.totalBytes
     stats.receivedBytes = record.receivedBytes
     stats.resumable = record.acceptsRanges
+    stats.checksum = record.checksum ?? record.serverChecksum
   }
 
   deinit { streamer.invalidate() }
@@ -396,6 +399,7 @@ public actor URLDownloadSession {
         response.value(forHTTPHeaderField: "Repr-Digest")
         ?? response.value(forHTTPHeaderField: "Digest")
       record.serverChecksum = header.flatMap { Checksum(digestHeader: $0) }
+      stats.checksum = record.checksum ?? record.serverChecksum
     }
     if record.filename == nil {
       record.filename = uniqueFilename(Self.filename(response, url: record.url))

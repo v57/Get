@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import GetKit
 import Observation
 import Torrent
 import URLDownload
@@ -48,7 +49,10 @@ import os
     /// Torrent name, or the file name of a URL download (once known).
     var title: String
     var state: TorrentState = .stopped
+    /// The whole job's progress (the transfer and the check after it), from `DownloadProgress`.
     var progress: Double = 0
+    /// Time left for the whole job, while it runs and every stage left has an estimate.
+    var remaining: TimeInterval?
     /// Download speed in bytes per second; 0 unless downloading.
     var bytesPerSecond: Double = 0
     /// The speed as shown ("18.4 MB/s"), empty unless downloading.
@@ -89,6 +93,16 @@ import os
     var checksum: Checksum?
     /// The checksum the finished file matched (the user's or the server's).
     var verifiedChecksum: Checksum?
+    /// What the finished file will be checked against (the user's checksum, else the server's), once known.
+    var plannedChecksum: Checksum?
+
+    /// The bytes the transfer has and needs: a link's, or a torrent's verified bytes over its files that weren't
+    /// removed.
+    var transferBytes: (received: Int64, total: Int64?) {
+      guard kind == .torrent else { return (receivedBytes, totalBytes) }
+      let kept = files.filter { !$0.isRemoved }
+      return (kept.reduce(0) { $0 + $1.verifiedBytes }, kept.reduce(0) { $0 + $1.length })
+    }
   }
 
   private(set) var items: [DownloadItem] = []
@@ -99,6 +113,10 @@ import os
   private var sessions: [String: TorrentSession] = [:]
   private var urlSessions: [String: URLDownloadSession] = [:]
   private var eventTasks: [String: Task<Void, Never>] = [:]
+  /// Each download's progress and time left, estimated from how long the same kind of work took before.
+  private var progress: [String: DownloadProgress] = [:]
+  /// Reads the running downloads' progress while any runs.
+  private var progressTimer: Task<Void, Never>?
 
   /// `~/Downloads` — where finished downloads end up.
   private static var downloadsRoot: URL {
@@ -223,6 +241,8 @@ import os
 
     let session = TorrentSession(torrent: torrent, settings: settings)
     sessions[id] = session
+    let announce = (torrent.announce ?? torrent.announceList.first?.first).flatMap { URL(string: $0) }
+    progress[id] = DownloadProgress(transferID: DownloadProgress.torrentTransferID(announce: announce))
     var files = torrent.files.enumerated().map { index, file in
       DownloadFileItem(index: index, path: file.path.joined(separator: "/"), length: file.length)
     }
@@ -281,11 +301,13 @@ import os
       return
     }
     removePausedMarker(id: itemID)
+    progress[itemID]?.stop()
 
     if let index = items.firstIndex(where: { $0.id == itemID }) {
       items[index].state = .stopped
       items[index].bytesPerSecond = 0
       items[index].peers = 0
+      items[index].remaining = nil
     }
   }
 
@@ -295,6 +317,7 @@ import os
   func trash(itemID: String) async {
     eventTasks[itemID]?.cancel()
     eventTasks[itemID] = nil
+    progress.removeValue(forKey: itemID)?.stop()
 
     if let session = urlSessions.removeValue(forKey: itemID) {
       await session.cancel()
@@ -433,6 +456,9 @@ import os
     let session = URLDownloadSession(
       record: record, saveDirectory: Self.activeDirectory, recordURL: recordURL)
     urlSessions[id] = session
+    progress[id] = DownloadProgress(
+      transferID: DownloadProgress.transferID(url: record.url),
+      checkID: (record.checksum ?? record.serverChecksum).map { Self.checkID($0.algorithm) })
 
     let name = record.url.lastPathComponent
     var item = DownloadItem(
@@ -466,6 +492,17 @@ import os
       items[index].state = shown
       if shown != .downloading { items[index].bytesPerSecond = 0 }
       switch state {
+      case .downloading:
+        let bytes = items[index].transferBytes
+        progress[id]?.transfer(received: bytes.received, of: bytes.total)
+      case .verifying:
+        let algorithm = (items[index].checksum ?? items[index].plannedChecksum)?.algorithm ?? .sha256
+        progress[id]?.checking(Self.checkID(algorithm), bytes: items[index].totalBytes ?? items[index].receivedBytes)
+      case .completed: progress[id]?.finish()
+      case .paused, .stopped, .failed: progress[id]?.stop()
+      }
+      refreshProgress(id)
+      switch state {
       case .failed(let message):
         items[index].error = message
         Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
@@ -481,7 +518,14 @@ import os
       }
       items[index].receivedBytes = stats.receivedBytes
       items[index].totalBytes = stats.totalBytes
-      items[index].progress = stats.progress
+      items[index].plannedChecksum = stats.checksum
+      progress[id]?.planCheck(stats.checksum.map { Self.checkID($0.algorithm) })
+      if items[index].state == .downloading {
+        progress[id]?.transfer(received: stats.receivedBytes, of: stats.totalBytes)
+      } else {
+        progress[id]?.idle(received: stats.receivedBytes, of: stats.totalBytes)
+      }
+      refreshProgress(id)
       items[index].connections = stats.connections
       items[index].resumable = stats.resumable
       items[index].bytesPerSecond = items[index].state == .downloading ? stats.downloadSpeed : 0
@@ -744,6 +788,15 @@ import os
       // Speed is only meaningful while downloading; a finished, paused or
       // failed download must not keep showing its last reading.
       if state != .downloading { items[index].bytesPerSecond = 0 }
+      switch state {
+      case .downloading:
+        let bytes = items[index].transferBytes
+        progress[id]?.transfer(received: bytes.received, of: bytes.total)
+      case .completed: progress[id]?.finish()
+      case .checking: break
+      case .paused, .stopped, .failed: progress[id]?.stop()
+      }
+      refreshProgress(id)
       if case .failed(let message) = state {
         items[index].error = message
         Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
@@ -761,7 +814,6 @@ import os
         Self.log.info("[\(id, privacy: .public)] peer dropped: \(host, privacy: .public)")
       }
     case .stats(let stats):
-      items[index].progress = stats.progress
       items[index].bytesPerSecond = items[index].state == .downloading ? stats.downloadSpeed : 0
       items[index].peers = stats.peersConnected
       items[index].seeders = stats.seedersConnected
@@ -775,6 +827,13 @@ import os
           items[index].files[fileIndex].sequentialBytes = stats.fileSequentialBytes[fileIndex]
         }
       }
+      let bytes = items[index].transferBytes
+      if items[index].state == .downloading {
+        progress[id]?.transfer(received: bytes.received, of: bytes.total)
+      } else {
+        progress[id]?.idle(received: bytes.received, of: bytes.total)
+      }
+      refreshProgress(id)
     case .error(let message):
       items[index].error = message
       Self.log.error("[\(id, privacy: .public)] engine error: \(message, privacy: .public)")
@@ -857,6 +916,35 @@ import os
     }
     guard let da = digest(a), let db = digest(b) else { return false }
     return da == db
+  }
+
+  // MARK: - Progress
+
+  private static func checkID(_ algorithm: Checksum.Algorithm) -> String {
+    DownloadProgress.checkID(algorithm: algorithm.rawValue)
+  }
+
+  /// Shows a download's progress and time left now, and keeps reading them on a timer while any download runs.
+  private func refreshProgress(_ id: String) {
+    guard let tracker = progress[id], let index = items.firstIndex(where: { $0.id == id }) else { return }
+    let reading = tracker.reading()
+    if items[index].progress != reading.fraction { items[index].progress = reading.fraction }
+    let remaining = tracker.isRunning ? reading.remaining.map { $0.rounded() } : nil
+    if items[index].remaining != remaining { items[index].remaining = remaining }
+    if tracker.isRunning, progressTimer == nil {
+      progressTimer = Task { [weak self] in
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .milliseconds(500))
+          guard let self else { return }
+          let running = self.progress.filter { $0.value.isRunning }.map(\.key)
+          for id in running { self.refreshProgress(id) }
+          if running.isEmpty {
+            self.progressTimer = nil
+            return
+          }
+        }
+      }
+    }
   }
 
   static func formatSpeed(_ bytesPerSecond: Double) -> String {

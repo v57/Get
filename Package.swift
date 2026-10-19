@@ -3,16 +3,27 @@
 
 import PackageDescription
 
+/// Another v57 repository: GitHub's main branch, or the checkout next to this one with `V57_LOCAL=1` (in Xcode,
+/// open Get-Local.xcworkspace instead).
+func v57(_ name: String) -> Package.Dependency {
+  Context.environment["V57_LOCAL"] == nil
+    ? .package(url: "https://github.com/v57/\(name).git", branch: "main") : .package(path: "../\(name)")
+}
+
 let package = Package(
-  name: "Get", platforms: [.macOS(.v13)],
+  name: "Get", platforms: [.macOS(.v14)],
   products: [
     .library(name: "GetKit", targets: ["GetKit"]),
     .library(name: "Torrent", targets: ["Torrent"]),
     .library(name: "URLDownload", targets: ["URLDownload"]),
   ],
+  dependencies: [
+    // CodeProgress: the download's progress and time left, from how long the same kind of work took before.
+    v57("Code")
+  ],
   targets: [
     .target(
-      name: "GetKit",
+      name: "GetKit", dependencies: [.product(name: "CodeProgress", package: "Code")],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
     .target(
       name: "Torrent", dependencies: ["GetKit"],

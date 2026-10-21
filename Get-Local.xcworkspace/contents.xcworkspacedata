@@ -16,4 +16,10 @@
    <FileRef
       location = "group:../Code">
    </FileRef>
+   <FileRef
+      location = "group:../Vault">
+   </FileRef>
+   <FileRef
+      location = "group:../Database">
+   </FileRef>
 </Workspace>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The v57 vault (../Vault): the hosts the v57 apps share (the user's Hub devices among them), in the app group
+	     container; this device's SSH key (Secure Enclave) and the hosts' passwords in the shared keychain group.
+	     For Download on…: a link fetched on another device. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(TeamIdentifierPrefix)dev.v57</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)dev.v57.shared</string>
+	</array>
+</dict>
+</plist>

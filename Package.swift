@@ -52,14 +52,15 @@ for target in package.targets where ["GetKit", "Torrent", "URLDownload"].contain
 #if os(Windows)
 // The app: a DLL the SwiftUI WinUI host loads (SwiftUI's Windows/scripts/build-app.ps1 -PackagePath <this package>
 // -Product GetWinUI), built from the Xcode project's sources with its settings.
-package.dependencies += [v57("Component"), v57("UpdateKit"), v57("Dev")]
+package.dependencies += [v57("Component"), v57("UpdateKit"), v57("Dev"), v57("Vault"), v57("Database")]
 package.targets.append(
   .target(
     name: "GetApp",
     dependencies: [
       "GetKit", "Torrent", "URLDownload", .product(name: "SwiftUI", package: "SwiftUI"),
       .product(name: "ComponentKit", package: "Component"), .product(name: "UpdateKit", package: "UpdateKit"),
-      .product(name: "DevScreenshots", package: "Dev"),
+      .product(name: "DevScreenshots", package: "Dev"), .product(name: "VaultKit", package: "Vault"),
+      .product(name: "SSHTunnel", package: "Database"),
     ] + standIns,
     path: "Get", exclude: ["Info.plist", "Assets.xcassets"],
     swiftSettings: [

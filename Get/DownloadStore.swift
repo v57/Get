@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import GetKit
 import Observation
+import SSHTunnel
 import Torrent
 import URLDownload
 import os
@@ -95,6 +96,9 @@ import os
     var verifiedChecksum: Checksum?
     /// What the finished file will be checked against (the user's checksum, else the server's), once known.
     var plannedChecksum: Checksum?
+    /// Downloads on another device (Download on…): the device's name, and where the file is there once saved.
+    var device: String?
+    var remotePath: String?
 
     /// The bytes the transfer has and needs: a link's, or a torrent's verified bytes over its files that weren't
     /// removed.
@@ -112,6 +116,8 @@ import os
 
   private var sessions: [String: TorrentSession] = [:]
   private var urlSessions: [String: URLDownloadSession] = [:]
+  /// Downloads running on other devices: the command, and what to start again on Retry.
+  private var remoteJobs: [String: (download: RemoteDownload, hostID: String, command: SSHCommand?)] = [:]
   private var eventTasks: [String: Task<Void, Never>] = [:]
   /// Each download's progress and time left, estimated from how long the same kind of work took before.
   private var progress: [String: DownloadProgress] = [:]
@@ -285,6 +291,7 @@ import os
   /// the item stays listed (as `.stopped`); the persisted `.torrent` copy
   /// or URL record is removed so it does NOT come back on relaunch.
   func cancel(itemID: String) {
+    if stopRemote(itemID: itemID) { return }
     eventTasks[itemID]?.cancel()
     eventTasks[itemID] = nil
 
@@ -315,6 +322,13 @@ import os
   /// downloaded files to the Trash, and drop its resume state + persisted
   /// `.torrent` copy so nothing comes back on relaunch.
   func trash(itemID: String) async {
+    // A download on another device stops; its file there stays.
+    if remoteJobs[itemID] != nil {
+      _ = stopRemote(itemID: itemID)
+      remoteJobs[itemID] = nil
+      items.removeAll { $0.id == itemID }
+      return
+    }
     eventTasks[itemID]?.cancel()
     eventTasks[itemID] = nil
     progress.removeValue(forKey: itemID)?.stop()
@@ -356,7 +370,7 @@ import os
   /// Pause the whole download (stops requesting; in-flight blocks finish).
   func pause(itemID: String) {
     guard let index = items.firstIndex(where: { $0.id == itemID }),
-      items[index].state == .downloading
+      items[index].state == .downloading, items[index].device == nil
     else { return }
     items[index].state = .paused
     persistPausedMarker(id: itemID)
@@ -380,6 +394,10 @@ import os
 
   /// Try a failed URL download again, from where it stopped.
   func retry(itemID: String) {
+    if let job = remoteJobs[itemID] {
+      runRemote(job.download, hostID: job.hostID, id: itemID)
+      return
+    }
     guard let index = items.firstIndex(where: { $0.id == itemID }),
       case .failed = items[index].state, let session = urlSessions[itemID]
     else { return }
@@ -569,6 +587,102 @@ import os
 
   private static func removeURLRecord(id: String) {
     try? FileManager.default.removeItem(at: urlRecordURL(id: id))
+  }
+
+  // MARK: - Downloads on other devices
+
+  /// Downloads a link on another device (a host via Hub, see `HubDevices`) into its `~/Downloads`, with the
+  /// progress streamed back. Only http(s) files: torrents need Get running there.
+  func download(from url: URL, checksum: Checksum? = nil, onDevice hostID: String) {
+    guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.pathExtension.lowercased() != "torrent"
+    else {
+      lastError = "Another device downloads http and https files; open torrents on this Mac."
+      return
+    }
+    let digest = SHA256.hash(data: Data((hostID + "|" + url.absoluteString).utf8))
+    let id = "remote-" + digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    guard !items.contains(where: { $0.id == id }) || remoteJobs[id]?.command == nil else { return }
+    let download = RemoteDownload(url: url, checksum: checksum)
+    if !items.contains(where: { $0.id == id }) {
+      var item = DownloadItem(id: id, title: download.fileName)
+      item.kind = .url
+      item.sourceURL = url
+      item.checksum = checksum
+      item.device = HubDevices.name(of: hostID) ?? "Another device"
+      items.append(item)
+    }
+    runRemote(download, hostID: hostID, id: id)
+  }
+
+  private func runRemote(_ download: RemoteDownload, hostID: String, id: String) {
+    guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+    guard let host = HubDevices.host(id: hostID) else {
+      items[index].state = .failed("The device is no longer on your Hub.")
+      return
+    }
+    items[index].state = .downloading
+    items[index].error = nil
+    do {
+      let (command, finished) = try HubDevices.start(download, on: host) { [weak self] event in
+        self?.apply(event, toRemote: id)
+      }
+      remoteJobs[id] = (download, hostID, command)
+      Task { [weak self] in
+        let result = await finished.result
+        self?.remoteFinished(id: id, command: command, result: result)
+      }
+    } catch {
+      remoteJobs[id] = (download, hostID, nil)
+      items[index].state = .failed(error.localizedDescription)
+      items[index].error = error.localizedDescription
+    }
+  }
+
+  private func apply(_ event: RemoteDownload.Event, toRemote id: String) {
+    guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+    switch event {
+    case .progress(let fraction): items[index].progress = fraction
+    case .saved(let path):
+      items[index].remotePath = path
+      items[index].title = (path as NSString).lastPathComponent
+    case .checksum(let hex):
+      if let expected = items[index].checksum {
+        if expected.hex == hex {
+          items[index].verifiedChecksum = expected
+        } else {
+          items[index].error = "The file on \(items[index].device ?? "the device") doesn’t match the \(expected.algorithm.rawValue) checksum."
+        }
+      }
+    case .failed(let message): items[index].error = message
+    }
+  }
+
+  private func remoteFinished(id: String, command: SSHCommand, result: Result<Int32?, Error>) {
+    guard remoteJobs[id]?.command === command, let index = items.firstIndex(where: { $0.id == id }) else { return }
+    remoteJobs[id]?.command = nil
+    switch result {
+    case .success(0?) where items[index].remotePath != nil && items[index].error == nil:
+      items[index].progress = 1
+      items[index].state = .completed
+    case .success(nil):
+      items[index].state = .stopped
+    case .success(let status):
+      let message = items[index].error ?? "The download stopped there (exit code \(status.map(String.init) ?? "?"))."
+      items[index].state = .failed(message)
+      items[index].error = message
+    case .failure(let error):
+      items[index].state = .failed(error.localizedDescription)
+      items[index].error = error.localizedDescription
+    }
+  }
+
+  /// Stops a download on another device; false when the item isn't one.
+  private func stopRemote(itemID: String) -> Bool {
+    guard let job = remoteJobs[itemID] else { return false }
+    job.command?.stop()
+    remoteJobs[itemID]?.command = nil
+    if let index = items.firstIndex(where: { $0.id == itemID }) { items[index].state = .stopped }
+    return true
   }
 
   // MARK: - Priorities

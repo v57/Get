@@ -28,6 +28,16 @@ struct URLDownloadDetailView: View {
           InspectorRow("Status", copyText: nil) { Text(status).monospacedDigit() }
           InspectorRow("Size", copyText: nil) { Text(size).monospacedDigit() }
         }
+        if let device = item.device {
+          KitSection("On \(device)", meta: "over SSH through your Hub", systemImage: "point.3.connected.trianglepath.dotted", hue: .purple) {
+            InspectorRow("Device", value: device, copyable: false)
+            if let path = item.remotePath {
+              InspectorRow("Saved as", value: path)
+            } else {
+              InspectorRow("Saving to", value: "Downloads on \(device)", copyable: false)
+            }
+          }
+        }
         KitSection(
           "Source", meta: item.sourceURL?.host() ?? "", systemImage: "link", hue: .teal
         ) {
@@ -42,7 +52,7 @@ struct URLDownloadDetailView: View {
           } else if let checksum = item.checksum {
             InspectorRow("Checksum", value: "\(checksum.algorithm.rawValue), checked when finished", copyable: false)
           }
-          if item.state == .downloading || item.state == .paused, item.totalBytes != nil {
+          if item.device == nil, item.state == .downloading || item.state == .paused, item.totalBytes != nil {
             InspectorRow(
               "Resume", value: item.resumable ? "Continues after interruptions" : "The server can't resume; restarts",
               copyable: false)
@@ -52,8 +62,12 @@ struct URLDownloadDetailView: View {
     }.kitPane(.secondary)
   }
 
-  /// "Downloading · 4 connections · 3.2 MB/s".
+  /// "Downloading · 4 connections · 3.2 MB/s", "Downloading on Mac Studio · 45%".
   private var status: String {
+    if let device = item.device {
+      return [item.state.label + " on \(device)", item.state == .downloading ? "\(Int(item.progress * 100))%" : ""]
+        .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
     var parts = [item.state.label]
     if item.state == .downloading, item.connections > 1 { parts.append("\(item.connections) connections") }
     if !item.speed.isEmpty { parts.append(item.speed) }
@@ -77,11 +91,15 @@ struct URLDownloadDetailView: View {
 /// verify the finished file against. Prefilled from the clipboard when it
 /// holds a link.
 struct URLDownloadSheet: View {
-  let onDownload: (URL, Checksum?) -> Void
+  /// The user's other devices it can download on instead (hosts via Hub): id and name.
+  var devices: [(id: String, name: String)] = []
+  /// The link, its checksum, and the device to download on (nil for this Mac).
+  let onDownload: (URL, Checksum?, String?) -> Void
 
   @Environment(\.dismiss) private var dismiss
   @State private var link = ""
   @State private var checksumText = ""
+  @State private var device = ""
 
   private var url: URL? { Self.parse(link) }
   private var checksum: Checksum? { Checksum(checksumText) }
@@ -107,6 +125,19 @@ struct URLDownloadSheet: View {
           error: checksumInvalid ? "Not a SHA-256, SHA-512, SHA-1 or MD5 checksum" : nil,
           field: TextField("Checksum", text: $checksumText, prompt: Text("Optional: SHA-256, SHA-1 or MD5"))
             .kitFont(.mono))
+        if !devices.isEmpty {
+          FormRow(
+            "Download on", help: device.isEmpty ? nil : "Into its Downloads folder, over SSH through your Hub",
+            systemImage: "point.3.connected.trianglepath.dotted", hue: .purple
+          ) {
+            Picker("Download on", selection: $device) {
+              Text("This \(KitDevice.name)").tag("")
+              ForEach(devices, id: \.id) { Text($0.name).tag($0.id) }
+            }
+            .labelsHidden()
+            .fixedSize()
+          }
+        }
       }
     } footer: {
       SheetStatus(
@@ -115,7 +146,7 @@ struct URLDownloadSheet: View {
       Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
       Button("Download") {
         guard let url else { return }
-        onDownload(url, checksum)
+        onDownload(url, checksum, device.isEmpty ? nil : device)
         dismiss()
       }.buttonStyle(.kitPrimary).keyboardShortcut(.defaultAction).disabled(url == nil || checksumInvalid)
     }.onAppear {

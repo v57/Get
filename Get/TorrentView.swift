@@ -62,8 +62,12 @@ struct TorrentView: View {
       await openDemoScene(CommandLine.arguments)
       Screenshots.ready()
     }.sheet(isPresented: $showURLSheet) {
-      URLDownloadSheet { url, checksum in
-        Task { await store.download(from: url, checksum: checksum) }
+      URLDownloadSheet(devices: HubDevices.choices) { url, checksum, device in
+        if let device {
+          store.download(from: url, checksum: checksum, onDevice: device)
+        } else {
+          Task { await store.download(from: url, checksum: checksum) }
+        }
       }.onAppear { urlSheetIsUp = true }.onDisappear { urlSheetIsUp = false }
     }.fileImporter(
       isPresented: $showImporter,
@@ -172,7 +176,7 @@ struct TorrentView: View {
       }
     case .url:
       switch item.state {
-      case .downloading, .paused:
+      case .downloading where item.device == nil, .paused where item.device == nil:
         Button(
           item.state == .paused ? "Resume" : "Pause",
           systemImage: item.state == .paused ? "play.fill" : "pause.fill"
@@ -295,7 +299,7 @@ private struct DownloadRow: View {
       if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
       Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { onReveal() }
       Divider()
-      if item.state == .downloading || item.state == .paused {
+      if item.device == nil, item.state == .downloading || item.state == .paused {
         Button(
           item.state == .paused ? "Resume" : "Pause", systemImage: item.state == .paused ? "play" : "pause"
         ) { onTogglePause() }
@@ -309,7 +313,7 @@ private struct DownloadRow: View {
 
   @ViewBuilder private var action: some View {
     switch item.state {
-    case .downloading, .paused:
+    case .downloading where item.device == nil, .paused where item.device == nil:
       Button(
         item.state == .paused ? "Resume" : "Pause",
         systemImage: item.state == .paused ? "play.fill" : "pause.fill", action: onTogglePause
@@ -620,10 +624,11 @@ extension DownloadStore.DownloadItem {
 
   /// The toolbar title's meta: "Downloading · 18.4 MB/s · 62% · 3 min left".
   var metaParts: [String] {
+    let place = device.map { ["on \($0)"] } ?? []
     switch state {
-    case .completed: [state.label, totalLength.map { $0.formatted(.byteCount(style: .file)) } ?? ""]
-    case .failed, .stopped: [state.label]
-    default: [state.label, speed, "\(Int(progress * 100))%", timeLeft]
+    case .completed: return [state.label] + place + [totalLength.map { $0.formatted(.byteCount(style: .file)) } ?? ""]
+    case .failed, .stopped: return [state.label] + place
+    default: return [state.label] + place + [speed, "\(Int(progress * 100))%", timeLeft]
     }
   }
 
@@ -637,12 +642,12 @@ extension DownloadStore.DownloadItem {
 
   /// The sidebar row's status line: "62% · 18.4 MB/s", "Paused · 14%", "Completed · 784 MB".
   var rowStatus: String {
-    let parts = state == .downloading ? ["\(Int(progress * 100))%", speed] : metaParts
+    let parts = state == .downloading ? ["\(Int(progress * 100))%", speed] + (device.map { ["on \($0)"] } ?? []) : metaParts
     return parts.filter { !$0.isEmpty }.joined(separator: " · ")
   }
 
   /// Whether there is a share to show: a link's size is known, a torrent has verified some of its data.
-  var hasProgress: Bool { kind == .url ? totalBytes != nil : progress > 0 || state == .checking }
+  var hasProgress: Bool { kind == .url ? totalBytes != nil || device != nil : progress > 0 || state == .checking }
 
   /// A bar while there is work left; finished, stopped and failed downloads drop theirs.
   var showsBar: Bool { state == .downloading || state == .paused || state == .checking }

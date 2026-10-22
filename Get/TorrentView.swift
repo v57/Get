@@ -98,20 +98,35 @@ struct TorrentView: View {
       case .torrent: TorrentDetailView(store: store, itemID: item.id, priorityMode: priorityMode)
       case .url: URLDownloadDetailView(store: store, itemID: item.id)
       }
-    } else if store.items.isEmpty {
-      EmptyState(
-        systemImage: "arrow.down", title: "No Downloads",
-        message: "Open a .torrent file, or download a link."
-      ) {
-        Button("Open Torrent…") { showImporter = true }.buttonStyle(.kitPrimary)
-        Button("Download a Link…") { showURLSheet = true }.buttonStyle(.kit)
-      }.kitPane()
     } else {
-      EmptyState(
-        systemImage: "arrow.down", title: "Select a Download",
-        message: "Choose a download from the sidebar."
-      ).kitPane()
+      welcome
     }
+  }
+
+  /// The main screen while no download is selected: the app, its two ways to start a download, and the finished
+  /// downloads (newest first), each selecting its download.
+  private var welcome: some View {
+    KitWelcome(
+      emptyTitle: "No Finished Downloads", emptyMessage: "What you download appears here once it finishes."
+    ) {
+      WelcomeAction(
+        "Open a .torrent File…", detail: "Its files download on this \(KitDevice.name)", systemImage: "plus"
+      ) {
+        showImporter = true
+      }
+      WelcomeAction("Download a Link…", detail: "Any http(s) file, here or on another device", systemImage: "link") {
+        showURLSheet = true
+      }
+    } recents: {
+      ForEach(store.items.filter { $0.state == .completed }.reversed()) { item in
+        RecentItem(
+          item.title, subtitle: item.device.map { "On \($0)" } ?? item.totalLength?.formatted(.byteCount(style: .file)),
+          systemImage: item.isSingleFile ? "doc" : "folder", id: item.id
+        ) { selectedID = item.id }
+      }
+    }
+    .listTitle("Finished Downloads")
+    .kitPane(.content)
   }
 
   // MARK: Toolbar

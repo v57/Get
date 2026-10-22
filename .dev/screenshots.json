@@ -40,6 +40,11 @@
       "caption": "See what went wrong, and retry"
     },
     {
+      "id": "08-welcome",
+      "arguments": ["--screenshot-demo", "--device", "completed"],
+      "caption": "Start a download, or find a finished one"
+    },
+    {
       "id": "09-error",
       "arguments": ["--screenshot-demo", "--error", "Magnet links aren't supported yet. Open the .torrent file instead."],
       "caption": "Tells you when a download can't start"

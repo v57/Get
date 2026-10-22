@@ -130,12 +130,10 @@ struct URLDownloadSheet: View {
             "Download on", help: device.isEmpty ? nil : "Into its Downloads folder, over SSH through your Hub",
             systemImage: "point.3.connected.trianglepath.dotted", hue: .purple
           ) {
-            Picker("Download on", selection: $device) {
-              Text("This \(KitDevice.name)").tag("")
-              ForEach(devices, id: \.id) { Text($0.name).tag($0.id) }
-            }
-            .labelsHidden()
-            .fixedSize()
+            KitPicker(
+              "Download on", selection: $device,
+              options: [("This \(KitDevice.name)", "")] + devices.map { ($0.name, $0.id) }
+            ).fixedSize()
           }
         }
       }

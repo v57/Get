@@ -158,7 +158,9 @@ struct URLDownloadSheet: View {
     }.onAppear {
       // The screenshot demo shows a link of its own, never the clipboard.
       if ScreenshotDemo.isOn {
-        link = "https://downloads.example.com/fonts/Atkinson-Hyperlegible.zip"
+        link = ScreenshotDemo.fedoraURL
+        checksumText = ScreenshotDemo.fedoraChecksum
+        device = devices.first { $0.name == "home-nas" }?.id ?? ""
         return
       }
       if link.isEmpty, let text = KitPasteboard.string(),

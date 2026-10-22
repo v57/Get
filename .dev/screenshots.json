@@ -23,6 +23,21 @@
       "id": "04-add-url",
       "arguments": ["--screenshot-demo", "--add-url"],
       "caption": "Paste a link, add a checksum"
+    },
+    {
+      "id": "05-device-link",
+      "arguments": ["--screenshot-demo", "--select", "Fedora-Workstation-Live-44.iso"],
+      "caption": "Download on your other devices"
+    },
+    {
+      "id": "06-device-done",
+      "arguments": ["--screenshot-demo", "--select", "Fedora-Workstation-Live-44.iso", "--device", "completed"],
+      "caption": "Checked where it lands"
+    },
+    {
+      "id": "07-device-failed",
+      "arguments": ["--screenshot-demo", "--select", "Fedora-Workstation-Live-44.iso", "--device", "failed"],
+      "caption": "See what went wrong, and retry"
     }
   ]
 }

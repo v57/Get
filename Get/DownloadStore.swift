@@ -166,7 +166,7 @@ import os
   init() {
     // The screenshot demo shows made-up downloads and never restores the user's.
     if ScreenshotDemo.isOn {
-      items = ScreenshotDemo.items
+      items = ScreenshotDemo.items(CommandLine.arguments)
       return
     }
     // Reopen every torrent that was active in a previous run. Sessions
@@ -209,6 +209,12 @@ import os
       return
     }
     try? FileManager.default.removeItem(at: dir)
+  }
+
+  /// A screenshot scene's demo list, from its arguments (the Fedora image's state, or the list without it).
+  func showDemo(_ arguments: [String]) {
+    guard ScreenshotDemo.isOn else { return }
+    items = ScreenshotDemo.items(arguments)
   }
 
   /// Open a `.torrent` file from any source (file importer, drag & drop,

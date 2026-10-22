@@ -62,7 +62,8 @@ struct TorrentView: View {
       await openDemoScene(CommandLine.arguments)
       Screenshots.ready()
     }.sheet(isPresented: $showURLSheet) {
-      URLDownloadSheet(devices: HubDevices.choices) { url, checksum, device in
+      URLDownloadSheet(devices: ScreenshotDemo.isOn ? ScreenshotDemo.devices : HubDevices.choices) {
+        url, checksum, device in
         if let device {
           store.download(from: url, checksum: checksum, onDevice: device)
         } else {
@@ -231,16 +232,20 @@ struct TorrentView: View {
 
   // MARK: Screenshots and drops
 
-  /// A screenshot scene of the demo list, from its arguments: `--select <title>` shows that download and `--add-url`
-  /// opens the Download from URL sheet. What the arguments don't mention is closed, so a scene never keeps the one
-  /// before's selection or sheet. Returns once the sheet has finished opening or closing.
+  /// A screenshot scene of the demo list, from its arguments: `--select <title>` shows that download, `--add-url`
+  /// opens the Download from URL sheet and `--device <state>` sets the download on home-nas. What the arguments don't
+  /// mention is closed, so a scene never keeps the one before's selection or sheet. Returns once the sheet has
+  /// finished opening or closing.
   private func openDemoScene(_ arguments: [String]) async {
     guard ScreenshotDemo.isOn else { return }
+    store.showDemo(arguments)
     selectedID = ScreenshotDemo.value("--select", in: arguments).flatMap { title in
       store.items.first { $0.title == title }?.id
     }
     showURLSheet = ScreenshotDemo.flag("--add-url", in: arguments)
     showImporter = false
+    // A download that finished or failed since the last scene drops into its row or shakes it: let that settle.
+    if ScreenshotDemo.value("--device", in: arguments) != nil { try? await Task.sleep(for: .seconds(1.5)) }
     for _ in 0..<60 where urlSheetIsUp != showURLSheet { try? await Task.sleep(for: .milliseconds(50)) }
   }
 

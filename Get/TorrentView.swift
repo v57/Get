@@ -288,7 +288,7 @@ private struct DownloadRow: View {
     } trailing: {
       action
     }
-    .progress(item.showsBar ? item.progress : nil)
+    .progress(item.showsBar ? item.progress : nil, status: item.workStatus)
     .effect(.receive("arrow.down.circle.fill"), on: finishes)
     .effect(.failure, on: failures)
     .onChange(of: item.state) { old, new in
@@ -525,8 +525,10 @@ private struct SingleFileRow: View {
           .frame(minWidth: 54, alignment: .trailing)
       }
       if !file.isDone {
-        KitProgressBar(value: fraction(file.sequentialBytes), secondary: fraction(file.verifiedBytes))
-          .opacity(file.isPaused ? 0.4 : 1)
+        let sequential = fraction(file.sequentialBytes)
+        KitProgressBar(
+          status: file.isPaused ? .paused(progress: sequential) : .working(progress: sequential),
+          secondary: fraction(file.verifiedBytes))
       }
       Text(
         "\(Text(file.sequentialBytes, format: .byteCount(style: .file))) / \(Text(file.verifiedBytes, format: .byteCount(style: .file)))"

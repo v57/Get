@@ -296,9 +296,11 @@ private struct DownloadRow: View {
       if new.isFailed, !old.isFailed { failures += 1 }
     }
     .kitContextMenu {
-      if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
-      Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { onReveal() }
-      Divider()
+      if item.device == nil {
+        if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
+        Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { onReveal() }
+        Divider()
+      }
       if item.device == nil, item.state == .downloading || item.state == .paused {
         Button(
           item.state == .paused ? "Resume" : "Pause", systemImage: item.state == .paused ? "play" : "pause"
@@ -320,7 +322,8 @@ private struct DownloadRow: View {
       ).buttonStyle(.kitIcon).help(item.state == .paused ? "Resume" : "Pause")
     case .failed where item.kind == .url:
       Button("Retry", systemImage: "arrow.clockwise", action: onRetry).buttonStyle(.kitIcon).help("Retry")
-    case .completed:
+    // A file saved on another device isn't on this Mac to show.
+    case .completed where item.device == nil:
       Button("Show in Finder", systemImage: "folder", action: onReveal).buttonStyle(.kitIcon)
         .help("Show in \(KitDesktop.fileManagerName)")
     default:

@@ -26,7 +26,10 @@ struct URLDownloadDetailView: View {
         }
         KitSection("Transfer", meta: transferMeta, systemImage: "arrow.down", status: item.workStatus) {
           InspectorRow("Status", copyText: nil) { Text(status).monospacedDigit() }
-          InspectorRow("Size", copyText: nil) { Text(size).monospacedDigit() }
+          // Another device reports only its share done, never the bytes.
+          if item.device == nil {
+            InspectorRow("Size", copyText: nil) { Text(size).monospacedDigit() }
+          }
         }
         if let device = item.device {
           KitSection("On \(device)", meta: "over SSH through your Hub", systemImage: "point.3.connected.trianglepath.dotted", hue: .purple) {
@@ -81,9 +84,14 @@ struct URLDownloadDetailView: View {
     return "\(received) of \(total.formatted(.byteCount(style: .file)))"
   }
 
-  /// "38.9 of 48 MB · 3.2 MB/s".
+  /// "38.9 of 48 MB · 3.2 MB/s"; on another device its share done ("45%", "Done").
   private var transferMeta: [String] {
-    [size, item.speed]
+    guard item.device != nil else { return [size, item.speed] }
+    switch item.state {
+    case .completed: return ["Done"]
+    case .downloading: return ["\(Int(item.progress * 100))%"]
+    default: return [item.state.label]
+    }
   }
 }
 

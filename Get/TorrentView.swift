@@ -61,7 +61,7 @@ struct TorrentView: View {
       Screenshots.prepare(waitsForReady: true) { scene in await openDemoScene(scene.arguments) }
       await openDemoScene(CommandLine.arguments)
       Screenshots.ready()
-    }.sheet(isPresented: $showURLSheet) {
+    }.kitSheet(isPresented: $showURLSheet) {
       URLDownloadSheet(devices: ScreenshotDemo.isOn ? ScreenshotDemo.devices : HubDevices.choices) {
         url, checksum, device in
         if let device {
@@ -76,14 +76,17 @@ struct TorrentView: View {
     ) { result in
       guard case .success(let url) = result else { return }
       Task { await store.open(url: url) }
-    }.alert(
-      "Couldn't Start Download",
-      isPresented: Binding(
-        get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })
+    }.kitSheet(
+      isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })
     ) {
-      Button("OK", role: .cancel) { store.lastError = nil }
-    } message: {
-      Text(store.lastError ?? "")
+      KitSheet(
+        title: "Couldn't Start Download", meta: store.lastError, systemImage: "exclamationmark.triangle", hue: .red
+      ) {
+        EmptyView()
+      } footer: {
+        Spacer()
+        Button("OK") { store.lastError = nil }.buttonStyle(.kitPrimary).keyboardShortcut(.defaultAction)
+      }
     }
   }
 
@@ -233,7 +236,8 @@ struct TorrentView: View {
   // MARK: Screenshots and drops
 
   /// A screenshot scene of the demo list, from its arguments: `--select <title>` shows that download, `--add-url`
-  /// opens the Download from URL sheet and `--device <state>` sets the download on home-nas. What the arguments don't
+  /// opens the Download from URL sheet, `--error <message>` shows that error and `--device <state>` sets the download
+  /// on home-nas. What the arguments don't
   /// mention is closed, so a scene never keeps the one before's selection or sheet. Returns once the sheet has
   /// finished opening or closing.
   private func openDemoScene(_ arguments: [String]) async {
@@ -243,6 +247,7 @@ struct TorrentView: View {
       store.items.first { $0.title == title }?.id
     }
     showURLSheet = ScreenshotDemo.flag("--add-url", in: arguments)
+    store.lastError = ScreenshotDemo.value("--error", in: arguments)
     showImporter = false
     // A download that finished or failed since the last scene drops into its row or shakes it: let that settle.
     if ScreenshotDemo.value("--device", in: arguments) != nil { try? await Task.sleep(for: .seconds(1.5)) }

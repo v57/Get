@@ -12,6 +12,7 @@ import URLDownload
 ///   --add-url                opens the Download from URL sheet, filled in to download the Fedora image on home-nas
 ///                            (the list without it)
 ///   --device <state>         the Fedora image on home-nas: downloading (the default), completed or failed
+///   --error <message>        shows the error a download couldn't start with
 ///
 /// A capture by `dev-screenshots` takes every scene in one launch: `TorrentView` opens each next scene from its
 /// arguments through `DevScreenshots`.

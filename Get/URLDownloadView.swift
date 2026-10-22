@@ -104,7 +104,7 @@ struct URLDownloadSheet: View {
   /// The link, its checksum, and the device to download on (nil for this Mac).
   let onDownload: (URL, Checksum?, String?) -> Void
 
-  @Environment(\.dismiss) private var dismiss
+  @Environment(\.kitDismiss) private var dismiss
   @State private var link = ""
   @State private var checksumText = ""
   @State private var device = ""

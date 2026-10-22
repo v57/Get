@@ -38,6 +38,11 @@
       "id": "07-device-failed",
       "arguments": ["--screenshot-demo", "--select", "Fedora-Workstation-Live-44.iso", "--device", "failed"],
       "caption": "See what went wrong, and retry"
+    },
+    {
+      "id": "09-error",
+      "arguments": ["--screenshot-demo", "--error", "Magnet links aren't supported yet. Open the .torrent file instead."],
+      "caption": "Tells you when a download can't start"
     }
   ]
 }

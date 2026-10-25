@@ -99,6 +99,8 @@ import os
     /// Downloads on another device (Download on…): the device's name, and where the file is there once saved.
     var device: String?
     var remotePath: String?
+    /// When the download finished: the Downloaded section lists the newest first.
+    var finishedAt: Date?
 
     /// The bytes the transfer has and needs: a link's, or a torrent's verified bytes over its files that weren't
     /// removed.
@@ -149,6 +151,13 @@ import os
       .appendingPathComponent("Get/URLs", isDirectory: true)
   }
 
+  /// The finished downloads, so the Downloaded section survives relaunches:
+  /// `~/Library/Application Support/Get/Downloaded.json`.
+  private static var finishedURL: URL {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+      .appendingPathComponent("Get/Downloaded.json")
+  }
+
   private static func urlRecordURL(id: String) -> URL {
     urlsDirectory.appendingPathComponent("\(id).json")
   }
@@ -169,6 +178,7 @@ import os
       items = ScreenshotDemo.items(CommandLine.arguments)
       return
     }
+    items = Self.loadFinished()
     // Reopen every torrent that was active in a previous run. Sessions
     // pick up the persisted resume state automatically (verified pieces
     // are skipped), so interrupted downloads continue on relaunch.
@@ -233,6 +243,7 @@ import os
     let torrent = try TorrentSession.parse(url: url)
     let id = torrent.infoHash.map { String(format: "%02x", $0) }.joined()
 
+    forgetIfPast(id)
     // Already known (or still listed after cancel) — don't duplicate.
     guard !items.contains(where: { $0.id == id }) else { return }
 
@@ -333,6 +344,7 @@ import os
       _ = stopRemote(itemID: itemID)
       remoteJobs[itemID] = nil
       items.removeAll { $0.id == itemID }
+      saveFinished()
       return
     }
     eventTasks[itemID]?.cancel()
@@ -345,6 +357,7 @@ import os
         try? FileManager.default.trashItem(at: location, resultingItemURL: nil)
       }
       items.removeAll { $0.id == itemID }
+      saveFinished()
       Self.removeURLRecord(id: itemID)
       removePausedMarker(id: itemID)
       Self.removeActiveDirectoryIfEmpty()
@@ -352,7 +365,14 @@ import os
     }
 
     guard let session = sessions.removeValue(forKey: itemID) else {
+      // A finished download from an earlier run, or a cancelled one: its files go to the Trash (a file on another
+      // device stays there).
+      if let item = items.first(where: { $0.id == itemID }), item.device == nil, let location = item.location {
+        try? FileManager.default.trashItem(at: location, resultingItemURL: nil)
+      }
       items.removeAll { $0.id == itemID }
+      saveFinished()
+      Self.removeActiveDirectoryIfEmpty()
       return
     }
     await session.cancel()
@@ -367,10 +387,23 @@ import os
     if let root { try? FileManager.default.trashItem(at: root, resultingItemURL: nil) }
 
     items.removeAll { $0.id == itemID }
+    saveFinished()
     removeTorrentCopy(id: itemID)
     removePausedMarker(id: itemID)
     try? FileManager.default.removeItem(at: ResumeState.fileURL(infoHashHex: itemID))
     Self.removeActiveDirectoryIfEmpty()
+  }
+
+  /// Take a finished download off the list; its files stay where they are.
+  func removeFromList(itemID: String) {
+    guard items.contains(where: { $0.id == itemID && $0.state == .completed }) else { return }
+    eventTasks.removeValue(forKey: itemID)?.cancel()
+    sessions[itemID] = nil
+    urlSessions[itemID] = nil
+    remoteJobs[itemID] = nil
+    progress.removeValue(forKey: itemID)?.stop()
+    items.removeAll { $0.id == itemID }
+    saveFinished()
   }
 
   /// Pause the whole download (stops requesting; in-flight blocks finish).
@@ -444,6 +477,7 @@ import os
       return
     }
     let id = Self.urlDownloadID(url)
+    forgetIfPast(id)
     // Already listed — don't duplicate.
     guard !items.contains(where: { $0.id == id }) else { return }
     startURLDownload(record: URLDownloadRecord(url: url, checksum: checksum), id: id)
@@ -532,6 +566,7 @@ import os
         Self.log.error("[\(id, privacy: .public)] failed: \(message, privacy: .public)")
       case .completed:
         items[index].error = nil
+        if items[index].finishedAt == nil { items[index].finishedAt = .now }
         finalizeURLDownload(itemID: id)
       default: break
       }
@@ -587,6 +622,7 @@ import os
     }
     Self.removeURLRecord(id: itemID)
     removePausedMarker(id: itemID)
+    saveFinished()
     Self.removeActiveDirectoryIfEmpty()
     Self.log.info("Moved \(self.items[index].title, privacy: .public) to Downloads")
   }
@@ -607,6 +643,7 @@ import os
     }
     let digest = SHA256.hash(data: Data((hostID + "|" + url.absoluteString).utf8))
     let id = "remote-" + digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    forgetIfPast(id)
     guard !items.contains(where: { $0.id == id }) || remoteJobs[id]?.command == nil else { return }
     let download = RemoteDownload(url: url, checksum: checksum)
     if !items.contains(where: { $0.id == id }) {
@@ -626,8 +663,11 @@ import os
       items[index].state = .failed("The device is no longer on your Hub.")
       return
     }
+    let wasCompleted = items[index].state == .completed
     items[index].state = .downloading
     items[index].error = nil
+    items[index].finishedAt = nil
+    if wasCompleted { saveFinished() }
     do {
       let (command, finished) = try HubDevices.start(download, on: host) { [weak self] event in
         self?.apply(event, toRemote: id)
@@ -670,6 +710,8 @@ import os
     case .success(0?) where items[index].remotePath != nil && items[index].error == nil:
       items[index].progress = 1
       items[index].state = .completed
+      items[index].finishedAt = .now
+      saveFinished()
     case .success(nil):
       items[index].state = .stopped
     case .success(let status):
@@ -812,6 +854,11 @@ import os
     for i in kept { keepActive(i) }
   }
 
+  /// A session or job still runs for the download (it isn't a finished one from an earlier run).
+  func isRunning(itemID: String) -> Bool {
+    sessions[itemID] != nil || urlSessions[itemID] != nil || remoteJobs[itemID] != nil
+  }
+
   // MARK: - Open and reveal
 
   /// The download on disk, if it is there yet.
@@ -862,6 +909,98 @@ import os
     KitDesktop.open(url)
   }
 
+  // MARK: - Finished downloads
+
+  /// A finished download as `Downloaded.json` keeps it: what its detail pane and row show.
+  private struct FinishedRecord: Codable {
+    struct File: Codable {
+      var path: String
+      var length: Int64
+      var isRemoved = false
+    }
+
+    var id: String
+    var title: String
+    var isTorrent: Bool
+    var finishedAt: Date
+    var location: URL?
+    var isSingleFile: Bool
+    var files: [File] = []
+    var fileOrder: [Int] = []
+    var sourceURL: URL?
+    var bytes: Int64?
+    var checksum: Checksum?
+    var verifiedChecksum: Checksum?
+    var device: String?
+    var remotePath: String?
+
+    init(_ item: DownloadItem) {
+      id = item.id
+      title = item.title
+      isTorrent = item.kind == .torrent
+      finishedAt = item.finishedAt ?? .now
+      location = item.location
+      isSingleFile = item.isSingleFile
+      files = item.files.map { File(path: $0.path, length: $0.length, isRemoved: $0.isRemoved) }
+      fileOrder = item.fileOrder
+      sourceURL = item.sourceURL
+      bytes = item.totalBytes ?? (item.kind == .url ? item.receivedBytes : nil)
+      checksum = item.checksum
+      verifiedChecksum = item.verifiedChecksum
+      device = item.device
+      remotePath = item.remotePath
+    }
+
+    var item: DownloadItem {
+      var item = DownloadItem(id: id, title: title, state: .completed, progress: 1)
+      item.kind = isTorrent ? .torrent : .url
+      item.finishedAt = finishedAt
+      item.location = location
+      item.isSingleFile = isSingleFile
+      item.files = files.enumerated().map { index, file in
+        DownloadFileItem(
+          index: index, path: file.path, length: file.length, verifiedBytes: file.isRemoved ? 0 : file.length,
+          sequentialBytes: file.isRemoved ? 0 : file.length, isRemoved: file.isRemoved)
+      }
+      item.fileOrder = fileOrder.count == files.count ? fileOrder : Array(files.indices)
+      item.sourceURL = sourceURL
+      item.receivedBytes = bytes ?? 0
+      item.totalBytes = bytes
+      item.checksum = checksum
+      item.verifiedChecksum = verifiedChecksum
+      item.device = device
+      item.remotePath = remotePath
+      return item
+    }
+  }
+
+  private static func loadFinished() -> [DownloadItem] {
+    guard let data = try? Data(contentsOf: finishedURL) else { return [] }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return ((try? decoder.decode([FinishedRecord].self, from: data)) ?? []).map(\.item)
+  }
+
+  /// Writes the finished downloads to `Downloaded.json`. Best effort: a failed write loses them on relaunch.
+  private func saveFinished() {
+    guard !ScreenshotDemo.isOn else { return }
+    let records = items.filter { $0.state == .completed }.map(FinishedRecord.init)
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    guard let data = try? encoder.encode(records) else { return }
+    try? FileManager.default.createDirectory(
+      at: Self.finishedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? data.write(to: Self.finishedURL, options: .atomic)
+  }
+
+  /// A finished download from an earlier run (nothing runs for it any more) leaves the list, so the same torrent or
+  /// link can download again.
+  private func forgetIfPast(_ id: String) {
+    guard items.contains(where: { $0.id == id && $0.state == .completed }), !isRunning(itemID: id) else { return }
+    items.removeAll { $0.id == id }
+    saveFinished()
+  }
+
   // MARK: - Persistence (resume on relaunch)
 
   /// Copy a `.torrent` file into the app's library so the download can be
@@ -904,7 +1043,14 @@ import os
     guard let index = items.firstIndex(where: { $0.id == id }) else { return }
     switch event {
     case .state(let state):
+      let wasCompleted = items[index].state == .completed
       items[index].state = state
+      if state == .completed, items[index].finishedAt == nil { items[index].finishedAt = .now }
+      // A finished download that has work again (a file restored) leaves the Downloaded section.
+      if wasCompleted, state != .completed {
+        items[index].finishedAt = nil
+        saveFinished()
+      }
       // Speed is only meaningful while downloading; a finished, paused or
       // failed download must not keep showing its last reading.
       if state != .downloading { items[index].bytesPerSecond = 0 }
@@ -1007,6 +1153,7 @@ import os
 
       // Record the final location so Trash and Open target the moved files.
       if let i = items.firstIndex(where: { $0.id == itemID }) { items[i].location = to }
+      saveFinished()
 
       // A finished download is no longer "active": drop its resume
       // state and persisted copy so relaunch won't re-add it.

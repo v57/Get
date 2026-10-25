@@ -82,6 +82,7 @@ enum ScreenshotDemo {
     var debian = Item(id: "demo-debian", title: "debian-13.6.0-amd64-netinst.iso")
     debian.state = .completed
     debian.progress = 1
+    debian.finishedAt = .now - 3 * 3600
     debian.files = [File(index: 0, path: "debian-13.6.0-amd64-netinst.iso", length: 784_000_000, verifiedBytes: 784_000_000, sequentialBytes: 784_000_000)]
     debian.fileOrder = [0]
 
@@ -103,7 +104,16 @@ enum ScreenshotDemo {
     kali.files = [File(index: 0, path: "kali-linux-2026.2-installer-amd64.iso", length: 4 * gigabyte, verifiedBytes: 560_000_000, sequentialBytes: 410_000_000)]
     kali.fileOrder = [0]
 
-    let items = [ubuntu, photos, font, kali, debian]
+    var blender = Item(id: "url-demo-blender", title: "blender-5.0.1-macos-arm64.dmg")
+    blender.kind = .url
+    blender.state = .completed
+    blender.progress = 1
+    blender.finishedAt = .now - 26 * 3600
+    blender.sourceURL = URL(string: "https://downloads.example.com/blender/blender-5.0.1-macos-arm64.dmg")
+    blender.receivedBytes = 412_000_000
+    blender.totalBytes = 412_000_000
+
+    let items = [ubuntu, photos, font, kali, blender, debian]
     if flag("--add-url", in: arguments) { return items }
     return items + [fedora(value("--device", in: arguments) ?? "downloading")]
   }
@@ -119,6 +129,7 @@ enum ScreenshotDemo {
     case "completed":
       fedora.state = .completed
       fedora.progress = 1
+      fedora.finishedAt = .now - 20 * 60
       fedora.remotePath = "/home/maya/Downloads/Fedora-Workstation-Live-44.iso"
       fedora.verifiedChecksum = fedora.checksum
     case "failed":

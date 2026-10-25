@@ -118,7 +118,7 @@ struct TorrentView: View {
         showURLSheet = true
       }
     } recents: {
-      ForEach(store.items.filter { $0.state == .completed }.reversed()) { item in
+      ForEach(store.finishedItems) { item in
         RecentItem(
           item.title, subtitle: item.device.map { "On \($0)" } ?? item.totalLength?.formatted(.byteCount(style: .file)),
           systemImage: item.isSingleFile ? "doc" : "folder", id: item.id
@@ -225,27 +225,36 @@ struct TorrentView: View {
       selection: $selectedID, searchText: $search, searchPrompt: "Search Downloads", columnVisibility: $columns
     ) {
       KitSection(
-        "Downloads", meta: store.sectionMeta, systemImage: "arrow.down", status: store.overallStatus
+        "Downloading", meta: store.sectionMeta, systemImage: "arrow.down", status: store.overallStatus
       ) {
-        ForEach(shownItems) { item in
-          DownloadRow(
-            item: item, onTogglePause: { store.togglePause(itemID: item.id) },
-            onTrash: { Task { await store.trash(itemID: item.id) } },
-            onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) },
-            onRetry: { store.retry(itemID: item.id) })
-        }
+        ForEach(shown(store.items.filter { $0.state != .completed })) { row($0) }
       } accessory: {
         Button("Open a .torrent file", systemImage: "plus") { showImporter = true }
+      }
+      if !store.finishedItems.isEmpty {
+        KitSection("Downloaded", meta: store.finishedMeta, systemImage: "checkmark", hue: .green) {
+          ForEach(shown(store.finishedItems)) { row($0) }
+        }
       }
     } bottomBar: {
       Button("Download a Link", systemImage: "link") { showURLSheet = true }
     }
   }
 
-  private var shownItems: [DownloadStore.DownloadItem] {
+  private func row(_ item: DownloadStore.DownloadItem) -> some View {
+    DownloadRow(
+      item: item, onTogglePause: { store.togglePause(itemID: item.id) },
+      onTrash: { Task { await store.trash(itemID: item.id) } },
+      onRemove: { store.removeFromList(itemID: item.id) },
+      onOpen: { store.open(itemID: item.id) }, onReveal: { store.reveal(itemID: item.id) },
+      onRetry: { store.retry(itemID: item.id) })
+  }
+
+  /// The downloads that match the search.
+  private func shown(_ items: [DownloadStore.DownloadItem]) -> [DownloadStore.DownloadItem] {
     let query = search.trimmingCharacters(in: .whitespaces)
-    guard !query.isEmpty else { return store.items }
-    return store.items.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    guard !query.isEmpty else { return items }
+    return items.filter { $0.title.localizedCaseInsensitiveContains(query) }
   }
 
   // MARK: Screenshots and drops
@@ -301,6 +310,7 @@ private struct DownloadRow: View {
   let item: DownloadStore.DownloadItem
   let onTogglePause: () -> Void
   let onTrash: () -> Void
+  let onRemove: () -> Void
   let onOpen: () -> Void
   let onReveal: () -> Void
   let onRetry: () -> Void
@@ -333,6 +343,9 @@ private struct DownloadRow: View {
       }
       if item.state.isFailed && item.kind == .url {
         Button("Retry", systemImage: "arrow.clockwise") { onRetry() }
+      }
+      if item.state == .completed {
+        Button("Remove from List", systemImage: "minus.circle") { onRemove() }
       }
       Button("Move to Trash", systemImage: "trash", role: .destructive) { onTrash() }
     }
@@ -466,7 +479,7 @@ private struct TorrentDetailView: View {
     Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
       .disabled(!onDisk)
     Divider()
-    if file.isRemoved {
+    if file.isRemoved, store.isRunning(itemID: itemID) {
       Button("Restore File", systemImage: "arrow.uturn.backward") {
         store.restoreFile(fileIndex: file.index, itemID: itemID)
       }
@@ -484,7 +497,7 @@ private struct TorrentDetailView: View {
     // Restrict the download to this file (or this file and every file
     // after it): every other file that isn't fully downloaded is
     // paused and trashed.
-    if item.files.count > 1 {
+    if item.files.count > 1, store.isRunning(itemID: itemID) {
       KitSubmenu("Download", systemImage: "arrow.down") {
         Button("Only This") { store.downloadOnly(fileIndex: file.index, itemID: itemID) }
         Button("Only This and After") {
@@ -670,9 +683,17 @@ extension DownloadStore.DownloadItem {
     return "\(left) left"
   }
 
-  /// The sidebar row's status line: "62% · 18.4 MB/s", "Paused · 14%", "Completed · 784 MB".
+  /// The sidebar row's status line: "62% · 18.4 MB/s", "Paused · 14%", "784 MB · 2 hours ago".
   var rowStatus: String {
-    let parts = state == .downloading ? ["\(Int(progress * 100))%", speed] + (device.map { ["on \($0)"] } ?? []) : metaParts
+    let place = device.map { ["on \($0)"] } ?? []
+    let parts =
+      switch state {
+      case .downloading: ["\(Int(progress * 100))%", speed] + place
+      case .completed:
+        [totalLength.map { $0.formatted(.byteCount(style: .file)) } ?? ""] + place
+          + [finishedAt.map { $0.formatted(.relative(presentation: .named)) } ?? ""]
+      default: metaParts
+      }
     return parts.filter { !$0.isEmpty }.joined(separator: " · ")
   }
 
@@ -698,13 +719,27 @@ extension DownloadStore {
     return .working(progress: active.reduce(0) { $0 + $1.progress } / Double(active.count))
   }
 
-  /// "3 downloading · 27.7 MB/s", or how many there are when nothing runs.
+  /// The finished downloads, newest first: the Downloaded section and the welcome's list.
+  var finishedItems: [DownloadItem] {
+    items.filter { $0.state == .completed }.sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
+  }
+
+  /// "3 downloading · 27.7 MB/s", or how many unfinished downloads there are when nothing runs.
   var sectionMeta: [String] {
     let active = activeItems
     guard !active.isEmpty else {
-      return [items.isEmpty ? "No downloads" : items.count == 1 ? "1 download" : "\(items.count) downloads"]
+      let count = items.count { $0.state != .completed }
+      return [count == 0 ? "No downloads" : count == 1 ? "1 download" : "\(count) downloads"]
     }
     return ["\(active.count) downloading", Self.formatSpeed(active.reduce(0) { $0 + $1.bytesPerSecond })]
+  }
+
+  /// "12 downloads · 18.2 GB": the Downloaded section's meta.
+  var finishedMeta: [String] {
+    let finished = finishedItems
+    let bytes = finished.filter { $0.device == nil }.compactMap(\.totalLength).reduce(0, +)
+    return [finished.count == 1 ? "1 download" : "\(finished.count) downloads", bytes > 0 ? bytes.formatted(.byteCount(style: .file)) : ""]
+      .filter { !$0.isEmpty }
   }
 
   /// The window title's meta with nothing selected: "5 downloads · 3 active · 60%".

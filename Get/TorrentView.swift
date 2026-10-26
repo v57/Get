@@ -84,7 +84,6 @@ struct TorrentView: View {
       ) {
         EmptyView()
       } footer: {
-        Spacer()
         Button("OK") { store.lastError = nil }.buttonStyle(.kitPrimary).keyboardShortcut(.defaultAction)
       }
     }

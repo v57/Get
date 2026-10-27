@@ -72,5 +72,32 @@ package.targets.append(
         ["Combine", "FoundationNetworking", "SwiftUIPortability"].flatMap { ["-Xfrontend", "-import-module", "-Xfrontend", $0] }),
     ]))
 package.products.append(.library(name: "GetWinUI", type: .dynamic, targets: ["GetApp"]))
+#elseif os(Linux)
+// The app on SwiftUI's GTK backend: an executable built from the Xcode project's sources with its settings
+// (V57_LOCAL=1 swift build --product Get).
+package.dependencies += [v57("Component"), v57("UpdateKit"), v57("Dev"), v57("Vault"), v57("Database")]
+package.targets.append(
+  .executableTarget(
+    name: "GetApp",
+    dependencies: [
+      "GetKit", "Torrent", "URLDownload", .product(name: "SwiftUI", package: "SwiftUI"),
+      .product(name: "SwiftUIPortability", package: "SwiftUI"), .product(name: "ComponentKit", package: "Component"),
+      .product(name: "UpdateKit", package: "UpdateKit"), .product(name: "DevScreenshots", package: "Dev"),
+      .product(name: "VaultKit", package: "Vault"), .product(name: "VaultUI", package: "Vault"),
+      .product(name: "SSHTunnel", package: "Database"),
+    ] + standIns,
+    path: "Get", exclude: ["Info.plist", "AppIcon.icon"],
+    swiftSettings: [
+      .swiftLanguageMode(.v5), .defaultIsolation(MainActor.self), .enableUpcomingFeature("ApproachableConcurrency"),
+      .enableUpcomingFeature("MemberImportVisibility"),
+      // On Apple platforms `import Foundation` brings Combine (ObservableObject, @Published), URLSession and the
+      // file APIs SwiftUIPortability adds (trash, security-scoped URLs) along, and `import SwiftUI` brings
+      // Observation: every file gets them here too.
+      .unsafeFlags(
+        ["Combine", "FoundationNetworking", "Observation", "SwiftUIPortability"].flatMap {
+          ["-Xfrontend", "-import-module", "-Xfrontend", $0]
+        }),
+    ]))
+package.products.append(.executable(name: "Get", targets: ["GetApp"]))
 #endif
 #endif

@@ -25,9 +25,14 @@ rm -rf $out
 mkdir -p $out
 
 echo "Archiving…"
+# actool-icon-slim stores the flattened pictures of an Icon Composer icon as HEVC instead of lossless (Assets.car
+# 1.7 MB -> 140 KB); Xcode reads a tool's version under its file name (com.apple.actool.version), so the copy is
+# named actool.
+install -d $out/icon-slim
+install -m 755 Scripts/actool-icon-slim $out/icon-slim/actool
 xcodebuild -project Get.xcodeproj -scheme Get -configuration Release \
   -destination 'generic/platform=macOS' -archivePath $out/Get.xcarchive \
-  SWIFT_LTO=YES ALTERNATE_LINKER_PATH=$PWD/Scripts/ld-archive-prelink \
+  SWIFT_LTO=YES ALTERNATE_LINKER_PATH=$PWD/Scripts/ld-archive-prelink ASSETCATALOG_EXEC=$PWD/$out/icon-slim/actool \
   'OTHER_SWIFT_FLAGS=$(inherited) -Xfrontend -internalize-at-link -Xfrontend -conditional-runtime-records' \
   DEVELOPMENT_TEAM=$team archive -quiet
 

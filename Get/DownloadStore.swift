@@ -642,7 +642,7 @@ import os
   func download(from url: URL, checksum: Checksum? = nil, onDevice hostID: String, in vault: Vault) {
     guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.pathExtension.lowercased() != "torrent"
     else {
-      lastError = "Another device downloads http and https files; open torrents on this Mac."
+      lastError = "Another device downloads http and https files; open torrents on this \(KitDevice.nameInSentence)."
       return
     }
     let digest = SHA256.hash(data: Data((hostID + "|" + url.absoluteString).utf8))

@@ -62,10 +62,9 @@ struct TorrentView: View {
       await openDemoScene(CommandLine.arguments)
       Screenshots.ready()
     }.kitSheet(isPresented: $showURLSheet) {
-      URLDownloadSheet(devices: ScreenshotDemo.isOn ? ScreenshotDemo.devices : HubDevices.choices) {
-        url, checksum, device in
+      URLDownloadSheet(demoDevices: ScreenshotDemo.isOn ? ScreenshotDemo.devices : nil) { url, checksum, device in
         if let device {
-          store.download(from: url, checksum: checksum, onDevice: device)
+          store.download(from: url, checksum: checksum, onDevice: device.hostID, in: device.vault)
         } else {
           Task { await store.download(from: url, checksum: checksum) }
         }

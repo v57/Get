@@ -2,6 +2,8 @@ import ComponentKit
 import SwiftUI
 import Torrent
 import URLDownload
+import VaultKit
+import VaultUI
 
 /// Detail pane for a URL download: the transfer (progress, speed, connections, size) and the source (link, checksum,
 /// resume), each a card whose header sums it up.
@@ -99,15 +101,18 @@ struct URLDownloadDetailView: View {
 /// verify the finished file against. Prefilled from the clipboard when it
 /// holds a link.
 struct URLDownloadSheet: View {
-  /// The user's other devices it can download on instead (hosts via Hub): id and name.
-  var devices: [(id: String, name: String)] = []
-  /// The link, its checksum, and the device to download on (nil for this Mac).
-  let onDownload: (URL, Checksum?, String?) -> Void
+  /// The screenshots' devices, in place of the account's (`ScreenshotDemo`): id and name.
+  var demoDevices: [(id: String, name: String)]?
+  /// The link, its checksum, and the device to download on with the vault of its account (nil for this Mac).
+  let onDownload: (URL, Checksum?, (hostID: String, vault: Vault)?) -> Void
 
   @Environment(\.kitDismiss) private var dismiss
   @State private var link = ""
   @State private var checksumText = ""
   @State private var device = ""
+  /// The account whose devices Download on offers, kept per window; Personal until another is picked.
+  @SceneStorage("downloadOn.account") private var accountID = VaultAccount.personal.id
+  @State private var vaults = Vaults.shared
 
   private var url: URL? { Self.parse(link) }
   private var checksum: Checksum? { Checksum(checksumText) }
@@ -116,6 +121,10 @@ struct URLDownloadSheet: View {
   }
   private var linkInvalid: Bool {
     !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && url == nil
+  }
+  /// Download on shows while there is a device to pick, or another account that may have some.
+  private var offersDevices: Bool {
+    demoDevices.map { !$0.isEmpty } ?? (!vaults.accounts.isEmpty || !vaults.personal.hubHosts.isEmpty)
   }
 
   var body: some View {
@@ -133,16 +142,24 @@ struct URLDownloadSheet: View {
           error: checksumInvalid ? "Not a SHA-256, SHA-512, SHA-1 or MD5 checksum" : nil,
           field: TextField("Checksum", text: $checksumText, prompt: Text("Optional: SHA-256, SHA-1 or MD5"))
             .kitFont(.mono))
-        if !devices.isEmpty {
-          FormRow(
-            "Download on", help: device.isEmpty ? nil : "Into its Downloads folder, over SSH through your Hub",
-            systemImage: "point.3.connected.trianglepath.dotted", hue: .purple
-          ) {
-            KitPicker(
-              "Download on", selection: $device,
-              options: [("This \(KitDevice.name)", "")] + devices.map { ($0.name, $0.id) }
-            ).fixedSize()
+        if offersDevices {
+          // The devices of one account at a time; switching it starts the pick over.
+          VaultAccountScope(selection: $accountID) { vault in
+            let devices = demoDevices ?? HubDevices.choices(in: vault)
+            FormRow(
+              "Download on", help: device.isEmpty ? nil : "Into its Downloads folder, over SSH through your Hub",
+              systemImage: "point.3.connected.trianglepath.dotted", hue: .purple
+            ) {
+              HStack(spacing: 6) {
+                VaultAccountPicker(style: .compact)
+                KitPicker(
+                  "Download on", selection: $device,
+                  options: [("This \(KitDevice.name)", "")] + devices.map { ($0.name, $0.id) }
+                ).fixedSize()
+              }
+            }
           }
+          .onChange(of: accountID) { device = "" }
         }
       }
     } footer: {
@@ -152,7 +169,7 @@ struct URLDownloadSheet: View {
       Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
       Button("Download") {
         guard let url else { return }
-        onDownload(url, checksum, device.isEmpty ? nil : device)
+        onDownload(url, checksum, device.isEmpty ? nil : (device, vault))
         dismiss()
       }.buttonStyle(.kitPrimary).keyboardShortcut(.defaultAction).disabled(url == nil || checksumInvalid)
     }.onAppear {
@@ -160,7 +177,7 @@ struct URLDownloadSheet: View {
       if ScreenshotDemo.isOn {
         link = ScreenshotDemo.fedoraURL
         checksumText = ScreenshotDemo.fedoraChecksum
-        device = devices.first { $0.name == "home-nas" }?.id ?? ""
+        device = demoDevices?.first { $0.name == "home-nas" }?.id ?? ""
         return
       }
       if link.isEmpty, let text = KitPasteboard.string(),
@@ -169,6 +186,11 @@ struct URLDownloadSheet: View {
         link = text.trimmingCharacters(in: .whitespacesAndNewlines)
       }
     }
+  }
+
+  /// The vault of the account Download on shows (Personal once that account is gone).
+  private var vault: Vault {
+    vaults.account(id: accountID).flatMap { vaults.vault(for: $0) } ?? vaults.personal
   }
 
   /// What the link will be saved as: its last path component, or its host (a magnet's name when it has one).

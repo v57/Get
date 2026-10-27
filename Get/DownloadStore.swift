@@ -6,6 +6,7 @@ import Observation
 import SSHTunnel
 import Torrent
 import URLDownload
+import VaultKit
 import os
 
 /// Owns the download sessions backing the UI: torrents and plain URL
@@ -118,8 +119,10 @@ import os
 
   private var sessions: [String: TorrentSession] = [:]
   private var urlSessions: [String: URLDownloadSession] = [:]
-  /// Downloads running on other devices: the command, and what to start again on Retry.
-  private var remoteJobs: [String: (download: RemoteDownload, hostID: String, command: SSHCommand?)] = [:]
+  /// Downloads running on other devices: the command, and what to start again on Retry (the device, and the vault of
+  /// the account it belongs to).
+  private var remoteJobs: [String: (download: RemoteDownload, hostID: String, vault: Vault, command: SSHCommand?)] =
+    [:]
   private var eventTasks: [String: Task<Void, Never>] = [:]
   /// Each download's progress and time left, estimated from how long the same kind of work took before.
   private var progress: [String: DownloadProgress] = [:]
@@ -434,7 +437,7 @@ import os
   /// Try a failed URL download again, from where it stopped.
   func retry(itemID: String) {
     if let job = remoteJobs[itemID] {
-      runRemote(job.download, hostID: job.hostID, id: itemID)
+      runRemote(job.download, hostID: job.hostID, in: job.vault, id: itemID)
       return
     }
     guard let index = items.firstIndex(where: { $0.id == itemID }),
@@ -633,9 +636,10 @@ import os
 
   // MARK: - Downloads on other devices
 
-  /// Downloads a link on another device (a host via Hub, see `HubDevices`) into its `~/Downloads`, with the
-  /// progress streamed back. Only http(s) files: torrents need Get running there.
-  func download(from url: URL, checksum: Checksum? = nil, onDevice hostID: String) {
+  /// Downloads a link on another device (a host via Hub in `vault`, the account the device was picked from; see
+  /// `HubDevices`) into its `~/Downloads`, with the progress streamed back. Only http(s) files: torrents need Get
+  /// running there.
+  func download(from url: URL, checksum: Checksum? = nil, onDevice hostID: String, in vault: Vault) {
     guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.pathExtension.lowercased() != "torrent"
     else {
       lastError = "Another device downloads http and https files; open torrents on this Mac."
@@ -651,15 +655,16 @@ import os
       item.kind = .url
       item.sourceURL = url
       item.checksum = checksum
-      item.device = HubDevices.name(of: hostID) ?? "Another device"
+      item.device = vault.host(id: hostID)?.displayName ?? "Another device"
       items.append(item)
     }
-    runRemote(download, hostID: hostID, id: id)
+    runRemote(download, hostID: hostID, in: vault, id: id)
   }
 
-  private func runRemote(_ download: RemoteDownload, hostID: String, id: String) {
+  private func runRemote(_ download: RemoteDownload, hostID: String, in vault: Vault, id: String) {
     guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-    guard let host = HubDevices.host(id: hostID) else {
+    // The account's vault, unless the account was deleted since.
+    guard Vaults.shared.account(id: vault.accountID) != nil, let host = vault.host(id: hostID) else {
       items[index].state = .failed("The device is no longer on your Hub.")
       return
     }
@@ -669,16 +674,16 @@ import os
     items[index].finishedAt = nil
     if wasCompleted { saveFinished() }
     do {
-      let (command, finished) = try HubDevices.start(download, on: host) { [weak self] event in
+      let (command, finished) = try HubDevices.start(download, on: host, in: vault) { [weak self] event in
         self?.apply(event, toRemote: id)
       }
-      remoteJobs[id] = (download, hostID, command)
+      remoteJobs[id] = (download, hostID, vault, command)
       Task { [weak self] in
         let result = await finished.result
         self?.remoteFinished(id: id, command: command, result: result)
       }
     } catch {
-      remoteJobs[id] = (download, hostID, nil)
+      remoteJobs[id] = (download, hostID, vault, nil)
       items[index].state = .failed(error.localizedDescription)
       items[index].error = error.localizedDescription
     }

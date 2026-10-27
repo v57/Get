@@ -15,6 +15,7 @@
 		D5C0DE000000000000000009 /* ComponentKit in Frameworks */ = {isa = PBXBuildFile; productRef = D5C0DE000000000000000008 /* ComponentKit */; };
 		6E70DE000000000000000003 /* VaultKit in Frameworks */ = {isa = PBXBuildFile; productRef = 6E70DE000000000000000002 /* VaultKit */; };
 		6E70DE000000000000000006 /* SSHTunnel in Frameworks */ = {isa = PBXBuildFile; productRef = 6E70DE000000000000000005 /* SSHTunnel */; };
+		6E70DE000000000000000008 /* VaultUI in Frameworks */ = {isa = PBXBuildFile; productRef = 6E70DE000000000000000007 /* VaultUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +42,7 @@
 				D5C0DE000000000000000009 /* ComponentKit in Frameworks */,
 				6E70DE000000000000000003 /* VaultKit in Frameworks */,
 				6E70DE000000000000000006 /* SSHTunnel in Frameworks */,
+				6E70DE000000000000000008 /* VaultUI in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -88,6 +90,7 @@
 				D5C0DE000000000000000008 /* ComponentKit */,
 				6E70DE000000000000000002 /* VaultKit */,
 				6E70DE000000000000000005 /* SSHTunnel */,
+				6E70DE000000000000000007 /* VaultUI */,
 			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* Get.app */;
@@ -473,6 +476,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 6E70DE000000000000000004 /* XCRemoteSwiftPackageReference "Database" */;
 			productName = SSHTunnel;
+		};
+		6E70DE000000000000000007 /* VaultUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6E70DE000000000000000001 /* XCRemoteSwiftPackageReference "Vault" */;
+			productName = VaultUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

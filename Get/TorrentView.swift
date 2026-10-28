@@ -108,7 +108,7 @@ struct TorrentView: View {
       emptyTitle: "No Finished Downloads", emptyMessage: "What you download appears here once it finishes."
     ) {
       WelcomeAction(
-        "Open a .torrent File…", detail: "Its files download on this \(KitDevice.name)", systemImage: "plus"
+        "Open a .torrent File…", detail: "Its files download on this \(KitDevice.nameInSentence)", systemImage: "plus"
       ) {
         showImporter = true
       }

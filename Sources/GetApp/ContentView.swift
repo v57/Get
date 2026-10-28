@@ -3,7 +3,7 @@ import SwiftUI
 import UpdateKit
 import os
 
-@main struct GetApp: App {
+public struct GetApp: App {
   #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   #endif
@@ -15,9 +15,9 @@ import os
   /// Get's red, the one colour the app picks.
   static let accent = Color(red: 1, green: 0x3b / 255, blue: 0x30 / 255)
 
-  init() { updater.start() }
+  public init() { updater.start() }
 
-  var body: some Scene {
+  public var body: some Scene {
     WindowGroup { TorrentView().componentKit(accent: Self.accent) }
       .commands { UpdaterCommands(updater: updater) }
   }

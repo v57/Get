@@ -34,3 +34,4 @@ KANBAN*.md
 # one, through <App>-Local.xcworkspace or V57_LOCAL=1), so nothing pins them
 /Get.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
 /Get-Local.xcworkspace/xcshareddata/
+/Package.resolved

@@ -34,8 +34,8 @@ let package = Package(
     .target(
       name: "URLDownload", dependencies: ["GetKit"],
       swiftSettings: [.enableUpcomingFeature("ApproachableConcurrency")], ),
-    // The app, all of it but its entry point (Get/GetMain.swift): the Xcode project builds that file into Get.app with
-    // the icon, Info.plist and entitlements; on Linux and Windows the GetMain target below does.
+    // The app, all of it but its entry point (Sources/Get/GetMain.swift): the Xcode project builds that file into Get.app
+    // with Resources (the icon, Info.plist and entitlements); on Linux and Windows the Get target below does.
     .target(
       name: "GetApp",
       dependencies: [
@@ -87,21 +87,21 @@ for target in package.targets where target.name == "GetApp" {
   ]
   target.swiftSettings = appSettings
 }
-// The entry point is the Xcode project's Get/GetMain.swift.
+// The entry point, Sources/Get/GetMain.swift, which the Xcode project builds on Apple platforms.
 #if os(Windows)
 // The app: a DLL the SwiftUI WinUI host loads (SwiftUI's Windows/scripts/build-app.ps1 -PackagePath <this package>
 // -Product GetWinUI).
 package.targets.append(
   .target(
-    name: "GetMain", dependencies: ["GetApp", .product(name: "SwiftUI", package: "SwiftUI")], path: "Get", exclude: ["Info.plist", "AppIcon.icon"],
+    name: "Get", dependencies: ["GetApp", .product(name: "SwiftUI", package: "SwiftUI")],
     swiftSettings: appSettings))
-package.products.append(.library(name: "GetWinUI", type: .dynamic, targets: ["GetMain"]))
+package.products.append(.library(name: "GetWinUI", type: .dynamic, targets: ["Get"]))
 #elseif os(Linux)
 // The app on SwiftUI's GTK backend (V57_LOCAL=1 swift build --product Get).
 package.targets.append(
   .executableTarget(
-    name: "GetMain", dependencies: ["GetApp", .product(name: "SwiftUI", package: "SwiftUI")], path: "Get", exclude: ["Info.plist", "AppIcon.icon"],
+    name: "Get", dependencies: ["GetApp", .product(name: "SwiftUI", package: "SwiftUI")],
     swiftSettings: appSettings))
-package.products.append(.executable(name: "Get", targets: ["GetMain"]))
+package.products.append(.executable(name: "Get", targets: ["Get"]))
 #endif
 #endif

@@ -35,3 +35,7 @@ KANBAN*.md
 /Get.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
 /Get-Local.xcworkspace/xcshareddata/
 /Package.resolved
+# The app's package (App/): its build output and pins, as at the root
+/App/.build
+/App/.swiftpm
+/App/Package.resolved

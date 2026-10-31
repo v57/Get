@@ -10,15 +10,12 @@ public struct GetApp: App {
 
   /// Updates from GitHub Releases (Get.zip, built by Scripts/release.sh): checked daily
   /// once the user turns on automatic checks (never before), installed in place with a relaunch.
-  private let updater = AppUpdater(github: "v57/Get", assetName: "Get.zip")
-
-  /// Get's red, the one colour the app picks.
-  static let accent = Color(red: 1, green: 0x3b / 255, blue: 0x30 / 255)
+  private let updater = AppUpdater(github: "v57/Get", assetName: "Get.zip", accent: .kitHubRed)
 
   public init() { updater.start() }
 
   public var body: some Scene {
-    WindowGroup { TorrentView().componentKit(accent: Self.accent) }
+    WindowGroup { TorrentView().componentKit(accent: .kitHubRed) }
       .commands { UpdaterCommands(updater: updater) }
   }
 }
@@ -68,4 +65,4 @@ public struct GetApp: App {
   }
 #endif
 
-#Preview { TorrentView().componentKit(accent: GetApp.accent) }
+#Preview { TorrentView().componentKit(accent: .kitHubRed) }

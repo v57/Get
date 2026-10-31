@@ -34,19 +34,8 @@ struct TorrentView: View {
         .kitToolbar(selected?.title ?? "Get") { title } tools: { tools }
         .kitSidebarToggle(columnVisibility: $columns)
     }
-    .kitDropTarget(isDropTargeted, cornerRadius: KitMetrics.radiusWindow)
-    .overlay {
-      if isDropTargeted {
-        Label("Drop to download", systemImage: "arrow.down")
-          .kitFont(.headline)
-          .padding(.horizontal, 14)
-          .padding(.vertical, 10)
-          .kitSurface(.floating, cornerRadius: KitMetrics.radiusCard)
-          .allowsHitTesting(false)
-          .transition(.opacity)
-      }
-    }
-    .animation(.kit, value: isDropTargeted)
+    .kitDropTarget(
+      isDropTargeted, label: "Drop to download", systemImage: "arrow.down", cornerRadius: KitMetrics.radiusWindow)
     .onDrop(of: [.fileURL, .url], isTargeted: $isDropTargeted) { providers in
       handleDrop(providers)
       return true
@@ -75,17 +64,7 @@ struct TorrentView: View {
     ) { result in
       guard case .success(let url) = result else { return }
       Task { await store.open(url: url) }
-    }.kitSheet(
-      isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })
-    ) {
-      KitSheet(
-        title: "Couldn't Start Download", meta: store.lastError, systemImage: "exclamationmark.triangle", hue: .red
-      ) {
-        EmptyView()
-      } footer: {
-        Button("OK") { store.lastError = nil }.buttonStyle(.kitPrimary).keyboardShortcut(.defaultAction)
-      }
-    }
+    }.kitNotice("Couldn't Start Download", message: $store.lastError, hue: .red)
   }
 
   // MARK: Detail
@@ -144,9 +123,9 @@ struct TorrentView: View {
     ToolbarSlot(priority: 0) {
       ToolGroup(iconOnly: true) {
         Button("Open a .torrent file", systemImage: "plus") { showImporter = true }
-          .help("Open a .torrent file")
+          .kitHelp("Open a .torrent file")
         Button("Download a link", systemImage: "link") { showURLSheet = true }
-          .help("Download a link")
+          .kitHelp("Download a link")
       }
     } menu: {
       Button("Open a .torrent File…", systemImage: "plus") { showImporter = true }
@@ -156,7 +135,7 @@ struct TorrentView: View {
       let onDisk = store.existingLocation(itemID: item.id) != nil
       ToolbarSlot(priority: 1) {
         ToolGroup(iconOnly: true) {
-          fileActions(item, onDisk: onDisk)
+          fileActions(item, onDisk: onDisk, tooltips: true)
         }
       } menu: {
         fileActions(item, onDisk: onDisk)
@@ -168,16 +147,22 @@ struct TorrentView: View {
       }
       Button("Move download to Trash", systemImage: "trash", role: .destructive) {
         Task { await store.trash(itemID: item.id) }
-      }.buttonStyle(.kitRound).help("Move download to Trash")
+      }.buttonStyle(.kitRound).kitHelp("Move download to Trash")
     }
   }
 
-  @ViewBuilder private func fileActions(_ item: DownloadStore.DownloadItem, onDisk: Bool) -> some View {
-    Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.reveal(itemID: item.id) }
-      .help("Show in \(KitDesktop.fileManagerName)").disabled(!onDisk)
-    if item.isSingleFile {
-      Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
-        .help("Open in its default app").disabled(!onDisk)
+  /// Show in Finder and Open, with tooltips in the toolbar (the overflow menu's rows have their titles).
+  @ViewBuilder private func fileActions(
+    _ item: DownloadStore.DownloadItem, onDisk: Bool, tooltips: Bool = false
+  ) -> some View {
+    let reveal = Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.reveal(itemID: item.id) }
+    let open = Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
+    if tooltips {
+      reveal.kitHelp("Show in \(KitDesktop.fileManagerName)").disabled(!onDisk)
+      if item.isSingleFile { open.kitHelp("Open in its default app").disabled(!onDisk) }
+    } else {
+      reveal.disabled(!onDisk)
+      if item.isSingleFile { open.disabled(!onDisk) }
     }
   }
 
@@ -189,7 +174,7 @@ struct TorrentView: View {
           // Entering the mode clears all priorities; leaving it keeps the assigned ones.
           if !priorityMode { store.clearAllPriorities(itemID: item.id) }
           priorityMode.toggle()
-        }.kitToolOn(priorityMode).help("Assign file download priority (1–4)")
+        }.kitToolOn(priorityMode).kitHelp("Assign file download priority (1–4)")
       }
     case .url:
       switch item.state {
@@ -199,10 +184,10 @@ struct TorrentView: View {
           systemImage: item.state == .paused ? "play.fill" : "pause.fill"
         ) {
           store.togglePause(itemID: item.id)
-        }.labelStyle(.iconOnly).help(item.state == .paused ? "Resume" : "Pause")
+        }.labelStyle(.iconOnly).kitHelp(item.state == .paused ? "Resume" : "Pause")
       case .failed:
         Button("Retry", systemImage: "arrow.clockwise") { store.retry(itemID: item.id) }
-          .labelStyle(.iconOnly).help("Try again from where it stopped")
+          .labelStyle(.iconOnly).kitHelp("Try again from where it stopped")
       default:
         EmptyView()
       }
@@ -355,13 +340,13 @@ private struct DownloadRow: View {
       Button(
         item.state == .paused ? "Resume" : "Pause",
         systemImage: item.state == .paused ? "play.fill" : "pause.fill", action: onTogglePause
-      ).buttonStyle(.kitIcon).help(item.state == .paused ? "Resume" : "Pause")
+      ).buttonStyle(.kitIcon).kitHelp(item.state == .paused ? "Resume" : "Pause")
     case .failed where item.kind == .url:
-      Button("Retry", systemImage: "arrow.clockwise", action: onRetry).buttonStyle(.kitIcon).help("Retry")
+      Button("Retry", systemImage: "arrow.clockwise", action: onRetry).buttonStyle(.kitIcon).kitHelp("Retry")
     // A file saved on another device isn't on this Mac to show.
     case .completed where item.device == nil:
       Button("Show in Finder", systemImage: "folder", action: onReveal).buttonStyle(.kitIcon)
-        .help("Show in \(KitDesktop.fileManagerName)")
+        .kitHelp("Show in \(KitDesktop.fileManagerName)")
     default:
       EmptyView()
     }
@@ -406,10 +391,12 @@ private struct TorrentDetailView: View {
     VStack(alignment: .leading, spacing: 6) {
       HStack(spacing: 16) {
         Chip(item.state.label, hue: item.state.hue).controlSize(.small)
-        stat("Peers", "\(item.peers)")
-        stat("Seeds", "\(item.seeders)")
-        if let s = item.trackerSeeders, let l = item.trackerLeechers {
-          stat("Swarm", "\(s) seeds · \(l) leechers")
+        MetaLine {
+          stat("Peers", "\(item.peers)")
+          stat("Seeds", "\(item.seeders)")
+          if let s = item.trackerSeeders, let l = item.trackerLeechers {
+            stat("Swarm", "\(s) seeds, \(l) leechers")
+          }
         }
       }.frame(height: 36)
       if let error = item.error {

@@ -3,14 +3,14 @@ import SSHTunnel
 import URLDownload
 import VaultKit
 
-/// The user's other devices a link can be downloaded on (Download on…): the hosts an account's vault keeps for the
-/// devices on its Hub, reached at their Hub Network address over SSH, signed in with this device's key (the Secure
-/// Enclave key every v57 app shares) or the host's saved password. The file lands in that device's `~/Downloads`.
+/// The user's other devices a link can be downloaded on (Download on…): the devices on the user's Hubs and the Macs
+/// that let the user's devices in (Settings ▸ Remote), reached over SSH at whichever of their addresses answers,
+/// signed in with this device's key (the Secure Enclave key every v57 app shares) or the host's saved password. The file lands in that device's `~/Downloads`.
 /// Each call takes the vault the device came from, so a download keeps its account's host.
 @MainActor enum HubDevices {
   /// The devices to offer, by name.
   static func hosts(in vault: Vault) -> [VaultHost] {
-    vault.hubHosts.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    vault.otherDeviceHosts.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
   }
 
   /// The devices as the Download sheet lists them: id and name.
@@ -36,7 +36,7 @@ import VaultKit
       // Trust on first use, as Shell and Database do; a device's signed key is trusted ahead of time by Vault.
       if server.knownFingerprint == nil, !command.hostKeyFingerprint.isEmpty {
         try? await MainActor.run {
-          try vault.store?.trust(fingerprint: command.hostKeyFingerprint, host: host.hostname, port: host.port)
+          try vault.trustStore(for: host)?.trust(fingerprint: command.hostKeyFingerprint, host: host.hostname, port: host.port)
         }
       }
       return status
@@ -46,14 +46,18 @@ import VaultKit
 
   /// How Get logs in to the host: its user, this device's key or the saved password, the trusted host key.
   static func server(for host: VaultHost, in vault: Vault) throws -> SSHServer {
-    let known = try? vault.store?.knownFingerprint(host: host.hostname, port: host.port)
+    let known = try? vault.trustStore(for: host)?.knownFingerprint(host: host.hostname, port: host.port)
     let user = host.user.isEmpty ? NSUserName() : host.user
+    // The device's other addresses, tried when this one doesn't answer.
+    let fallbacks = vault.fallbackAddresses(of: host)
     if host.auth == .password {
       return SSHServer(
-        host: host.hostname, port: host.port, user: user, password: VaultSecrets.password(for: host.id),
-        knownFingerprint: known)
+        host: host.hostname, fallbackHosts: fallbacks, port: host.port, user: user,
+        password: VaultSecrets.password(for: host.id), knownFingerprint: known)
     }
-    return SSHServer(host: host.hostname, port: host.port, user: user, key: try deviceKey(), knownFingerprint: known)
+    return SSHServer(
+      host: host.hostname, fallbackHosts: fallbacks, port: host.port, user: user, key: try deviceKey(),
+      knownFingerprint: known)
   }
 
   /// This device's SSH key (Secure Enclave, shared by the v57 apps), as Database signs in with it.

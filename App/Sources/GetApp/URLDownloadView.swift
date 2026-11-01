@@ -124,7 +124,7 @@ struct URLDownloadSheet: View {
   }
   /// Download on shows while there is a device to pick, or another account that may have some.
   private var offersDevices: Bool {
-    demoDevices.map { !$0.isEmpty } ?? (!vaults.accounts.isEmpty || !vaults.personal.hubHosts.isEmpty)
+    demoDevices.map { !$0.isEmpty } ?? (!vaults.accounts.isEmpty || !vaults.personal.otherDeviceHosts.isEmpty)
   }
 
   var body: some View {

@@ -28,7 +28,7 @@ struct TorrentView: View {
   var body: some View {
     NavigationSplitView(columnVisibility: $columns) {
       // The sidebar has its own toggle; the kit's toolbar brings a hidden sidebar back.
-      sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 260).toolbar(removing: .sidebarToggle)
+      sidebar.kitSidebarColumn().toolbar(removing: .sidebarToggle)
     } detail: {
       detail
         .kitToolbar(selected?.title ?? "Get") { title } tools: { tools }

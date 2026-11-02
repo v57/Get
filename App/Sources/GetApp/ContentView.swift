@@ -1,6 +1,7 @@
 import ComponentKit
 import SwiftUI
 import UpdateKit
+import VaultKit
 import os
 
 public struct GetApp: App {
@@ -12,7 +13,11 @@ public struct GetApp: App {
   /// once the user turns on automatic checks (never before), installed in place with a relaunch.
   private let updater = AppUpdater(github: "v57/Get", assetName: "Get.zip", accent: .kitHubRed)
 
-  public init() { updater.start() }
+  public init() {
+    updater.start()
+    // The hosts Download on… lists sync on their own, whichever v57 apps this Mac runs.
+    Vault.shared.startSync()
+  }
 
   public var body: some Scene {
     WindowGroup { TorrentView().componentKit(accent: .kitHubRed) }

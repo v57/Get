@@ -4,7 +4,7 @@
 <dict>
 	<!-- The v57 vault (../Vault): the hosts the v57 apps share (the user's Hub devices among them), in the app group
 	     container; this device's SSH key (Secure Enclave) and the hosts' passwords in the shared keychain group.
-	     For Download on…: a link fetched on another device. -->
+	     For Download on…: a link fetched on another device. iCloud sync through CloudKit. -->
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>$(TeamIdentifierPrefix)dev.v57</string>
@@ -13,5 +13,17 @@
 	<array>
 		<string>$(AppIdentifierPrefix)dev.v57.shared</string>
 	</array>
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.dev.v57</string>
+	</array>
+	<key>com.apple.developer.icloud-services</key>
+	<array>
+		<string>CloudKit</string>
+	</array>
+	<key>com.apple.developer.icloud-container-environment</key>
+	<string>Production</string>
+	<key>com.apple.developer.aps-environment</key>
+	<string>development</string>
 </dict>
 </plist>

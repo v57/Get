@@ -2,6 +2,7 @@ import ComponentKit
 import SwiftUI
 import UpdateKit
 import VaultKit
+import VaultUI
 import os
 
 public struct GetApp: App {
@@ -20,7 +21,7 @@ public struct GetApp: App {
   }
 
   public var body: some Scene {
-    WindowGroup { TorrentView().componentKit(accent: .kitHubRed) }
+    WindowGroup { TorrentView().vaultHostKeyRequests().componentKit(accent: .kitHubRed) }
       .commands { UpdaterCommands(updater: updater) }
   }
 }

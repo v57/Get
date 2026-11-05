@@ -135,10 +135,15 @@ struct TorrentView: View {
       let onDisk = store.existingLocation(itemID: item.id) != nil
       ToolbarSlot(priority: 1) {
         ToolGroup(iconOnly: true) {
-          fileActions(item, onDisk: onDisk, tooltips: true)
+          fileActions(item, onDisk: onDisk)
         }
       } menu: {
-        fileActions(item, onDisk: onDisk)
+        KitOpenWithRow(
+          openApps(
+            item.location, opens: item.isSingleFile, onOpen: { store.open(itemID: item.id) },
+            onReveal: { store.reveal(itemID: item.id) },
+            revealPreview: "Selects \(item.title) in its folder in \(KitDesktop.fileManagerName).")
+        ).disabled(!onDisk)
       }
       if item.isActive || canSetPriority(item) {
         ToolGroup {
@@ -151,19 +156,12 @@ struct TorrentView: View {
     }
   }
 
-  /// Show in Finder and Open, with tooltips in the toolbar (the overflow menu's rows have their titles).
-  @ViewBuilder private func fileActions(
-    _ item: DownloadStore.DownloadItem, onDisk: Bool, tooltips: Bool = false
-  ) -> some View {
+  /// Show in Finder and Open, with tooltips in the toolbar (folded into "…" they're one Open With row).
+  @ViewBuilder private func fileActions(_ item: DownloadStore.DownloadItem, onDisk: Bool) -> some View {
     let reveal = Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.reveal(itemID: item.id) }
     let open = Button("Open", systemImage: "arrow.up.forward.app") { store.open(itemID: item.id) }
-    if tooltips {
-      reveal.kitHelp("Show in \(KitDesktop.fileManagerName)").disabled(!onDisk)
-      if item.isSingleFile { open.kitHelp("Open in its default app").disabled(!onDisk) }
-    } else {
-      reveal.disabled(!onDisk)
-      if item.isSingleFile { open.disabled(!onDisk) }
-    }
+    reveal.kitHelp("Show in \(KitDesktop.fileManagerName)").disabled(!onDisk)
+    if item.isSingleFile { open.kitHelp("Open in its default app").disabled(!onDisk) }
   }
 
   @ViewBuilder private func itemActions(_ item: DownloadStore.DownloadItem) -> some View {
@@ -315,8 +313,7 @@ private struct DownloadRow: View {
     }
     .kitContextMenu {
       if item.device == nil {
-        if item.isSingleFile { Button("Open", systemImage: "arrow.up.forward.app") { onOpen() } }
-        Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { onReveal() }
+        KitOpenWithRow(openApps(item.location, opens: item.isSingleFile, onOpen: onOpen, onReveal: onReveal))
         Divider()
       }
       if item.device == nil, item.state == .downloading || item.state == .paused {
@@ -331,7 +328,14 @@ private struct DownloadRow: View {
         Button("Remove from List", systemImage: "minus.circle") { onRemove() }
       }
       Button("Move to Trash", systemImage: "trash", role: .destructive) { onTrash() }
+        .kitMenuPreview(trashPreview)
     }
+  }
+
+  /// A download on another device stops there, and its file stays.
+  private var trashPreview: String {
+    if let device = item.device { return "Takes it off the list. Its file stays on \(device)." }
+    return "Takes it off the list and moves \(item.isSingleFile ? "its file" : "its files") to the Trash."
   }
 
   @ViewBuilder private var action: some View {
@@ -351,6 +355,22 @@ private struct DownloadRow: View {
       EmptyView()
     }
   }
+}
+
+/// A download's (or one file's) Open With row: its default app when `opens` (a single file), then the file manager. The
+/// store's open and reveal run them, so their checks stay (nothing happens while the file isn't on disk yet).
+@MainActor private func openApps(
+  _ url: URL?, opens: Bool, onOpen: @escaping () -> Void, onReveal: @escaping () -> Void,
+  revealPreview: String? = nil
+) -> [KitOpenApp?] {
+  var open: KitOpenApp?
+  if opens {
+    open = url.map { KitOpenApp.defaultApp(opening: $0) } ?? KitOpenApp("Open", icon: nil, words: "Open") {}
+    open?.action = onOpen
+  }
+  var reveal = KitOpenApp.fileManager(revealing: url.map { [$0] } ?? [], preview: revealPreview)
+  reveal.action = onReveal
+  return [open, reveal]
 }
 
 // MARK: - Torrent detail
@@ -458,11 +478,12 @@ private struct TorrentDetailView: View {
   }
 
   @ViewBuilder private func fileMenu(_ file: DownloadStore.DownloadFileItem) -> some View {
-    let onDisk = store.existingFileURL(fileIndex: file.index, itemID: itemID) != nil
-    Button("Open", systemImage: "arrow.up.forward.app") { store.openFile(fileIndex: file.index, itemID: itemID) }
-      .disabled(!onDisk)
-    Button("Show in \(KitDesktop.fileManagerName)", systemImage: "folder") { store.revealFile(fileIndex: file.index, itemID: itemID) }
-      .disabled(!onDisk)
+    let url = store.existingFileURL(fileIndex: file.index, itemID: itemID)
+    KitOpenWithRow(
+      openApps(
+        url, opens: true, onOpen: { store.openFile(fileIndex: file.index, itemID: itemID) },
+        onReveal: { store.revealFile(fileIndex: file.index, itemID: itemID) })
+    ).disabled(url == nil)
     Divider()
     if file.isRemoved, store.isRunning(itemID: itemID) {
       Button("Restore File", systemImage: "arrow.uturn.backward") {
@@ -476,7 +497,7 @@ private struct TorrentDetailView: View {
       if file.isPaused {
         Button("Remove File", systemImage: "trash", role: .destructive) {
           store.removeFile(fileIndex: file.index, itemID: itemID)
-        }
+        }.kitMenuPreview("Removes this file from the download.")
       }
     }
     // Restrict the download to this file (or this file and every file

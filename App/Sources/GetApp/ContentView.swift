@@ -23,6 +23,16 @@ public struct GetApp: App {
   public var body: some Scene {
     WindowGroup { TorrentView().vaultHostKeyRequests().componentKit(accent: .kitHubRed) }
       .commands { UpdaterCommands(updater: updater) }
+    #if os(macOS)
+      Settings {
+        KitSettings(selection: .constant("Privacy"), window: .hiddenTitleBar) {
+          SettingsPane("Privacy", systemImage: "hand.raised", hue: .blue) { VaultICloudCard() }
+        }
+        .frame(width: 640, height: 360)
+        .componentKit(accent: .kitHubRed)
+      }
+      .windowStyle(.hiddenTitleBar)
+    #endif
   }
 }
 

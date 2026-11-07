@@ -420,7 +420,7 @@ private struct TorrentDetailView: View {
         }
       }.frame(height: 36)
       if let error = item.error {
-        Banner("Download failed", message: error, systemImage: "exclamationmark.triangle", hue: .red)
+        Banner("Download failed", message: "\(error)", systemImage: "exclamationmark.triangle", hue: .red)
       }
       if priorityMode {
         Text("Click files to set priority 1–4; others download after.").kitFont(.caption)

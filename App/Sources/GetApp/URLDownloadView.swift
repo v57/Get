@@ -20,7 +20,7 @@ struct URLDownloadDetailView: View {
       VStack(alignment: .leading, spacing: 18) {
         if let error = item.error {
           Banner(
-            item.state.isFailed ? "Download failed" : "Connection trouble", message: error,
+            item.state.isFailed ? "Download failed" : "Connection trouble", message: "\(error)",
             systemImage: "exclamationmark.triangle", hue: item.state.isFailed ? .red : .orange
           ) {
             if item.state.isFailed { Button("Retry") { store.retry(itemID: itemID) } }
@@ -154,7 +154,7 @@ struct URLDownloadSheet: View {
                 VaultAccountPicker(style: .compact)
                 KitPicker(
                   "Download on", selection: $device,
-                  options: [("This \(KitDevice.name)", "")] + devices.map { ($0.name, $0.id) }
+                  options: [("This \(KitDevice.name)", "")] + devices.map { ("\($0.name)", $0.id) }
                 ).fixedSize()
               }
             }
@@ -164,7 +164,7 @@ struct URLDownloadSheet: View {
       }
     } footer: {
       SheetStatus(
-        url.map(Self.name(of:)) ?? "Paste or type a link", systemImage: "doc",
+        url.map { "\(Self.name(of: $0))" } ?? "Paste or type a link", systemImage: "doc",
         status: url == nil ? .idle : .done)
       Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
       Button("Download") {

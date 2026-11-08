@@ -3,7 +3,8 @@
 <plist version="1.0">
 <dict>
 	<!-- The v57 vault (../Vault): the hosts the v57 apps share (the user's Hub devices among them), in the app group
-	     container; this device's SSH key (Secure Enclave) and the hosts' passwords in the shared keychain group.
+	     container; a copy of the vault keys in the records group (no passwords, no device key: security audit M4), and
+	     an SSH key of the app's own in its own group, which the user allows on each Mac (Vault ▸ Settings ▸ Remote).
 	     For Download on…: a link fetched on another device. iCloud sync through CloudKit. -->
 	<key>com.apple.security.application-groups</key>
 	<array>
@@ -11,7 +12,8 @@
 	</array>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)dev.v57.shared</string>
+		<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		<string>$(AppIdentifierPrefix)dev.v57.records</string>
 	</array>
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array>

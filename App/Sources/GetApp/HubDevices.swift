@@ -6,7 +6,7 @@ import VaultUI
 
 /// The user's other devices a link can be downloaded on (Download on…): the devices on the user's Hubs and the Macs
 /// that let the user's devices in (Settings ▸ Remote), reached over SSH at whichever of their addresses answers,
-/// signed in with this device's key (the Secure Enclave key every v57 app shares) or the host's saved password. The file lands in that device's `~/Downloads`.
+/// signed in with Get's own key, which the user allows on each Mac (security audit M4). The file lands in that device's `~/Downloads`.
 /// Each call takes the vault the device came from, so a download keeps its account's host.
 @MainActor enum HubDevices {
   /// The devices to offer, by name.
@@ -38,7 +38,7 @@ import VaultUI
     return (command, finished)
   }
 
-  /// How Get logs in to the host: its user, this device's key or the saved password, and the trusted host key: one a
+  /// How Get logs in to the host: its user, its own key, and the trusted host key: one a
   /// device signed or the user accepted, else the user is asked before anything is sent.
   static func server(for host: VaultHost, in vault: Vault) throws -> SSHServer {
     let trust = SSHHostTrust.known(
@@ -49,17 +49,16 @@ import VaultUI
     let user = host.user.isEmpty ? NSUserName() : host.user
     // The device's other addresses, tried when this one doesn't answer.
     let fallbacks = vault.fallbackAddresses(of: host)
-    if host.auth == .password {
-      return SSHServer(
-        host: host.hostname, fallbackHosts: fallbacks, port: host.port, user: user,
-        password: VaultSecrets.password(for: host.id), trust: trust)
-    }
+    // Get holds no passwords and not the device's key (security audit M4): it signs in with a key of its own, which the
+    // user allows on each Mac in Vault ▸ Settings ▸ Remote. Publishing it is what lists it there.
+    guard host.auth != .password else { throw AppKeyLogin.passwordHost(host.displayName) }
+    Task { @MainActor in try? vault.store?.publishDeviceKey() }
     return SSHServer(
       host: host.hostname, fallbackHosts: fallbacks, port: host.port, user: user, key: try deviceKey(),
       trust: trust)
   }
 
-  /// This device's SSH key (Secure Enclave, shared by the v57 apps), as Database signs in with it.
+  /// Get's own SSH key (Secure Enclave; `VaultIdentity` keeps it in Get's own keychain group).
   private static func deviceKey() throws -> SSHKey {
     let key = try VaultIdentity.key()
     let blob = VaultIdentity.publicKeyBlob(key)
@@ -73,5 +72,17 @@ import VaultUI
     private let lock = NSLock()
     private var parser = RemoteDownload.Parser()
     func consume(_ data: Data) -> [RemoteDownload.Event] { lock.withLock { parser.consume(data) } }
+  }
+}
+
+/// Why Get can't sign in to a host.
+enum AppKeyLogin: LocalizedError {
+  case passwordHost(String)
+
+  var errorDescription: String? {
+    switch self {
+    case .passwordHost(let name):
+      "Get signs in with its own key, and “\(name)” takes a password. Allow Get on that Mac in Vault ▸ Settings ▸ Remote and set the host to sign in with a key."
+    }
   }
 }

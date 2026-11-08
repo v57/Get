@@ -1,0 +1,87 @@
+{
+  "originHash" : "ef22989fbda05f7e21d6784e6ad1f3b119fe89f6f6ae12ebe6dcd995b596edef",
+  "pins" : [
+    {
+      "identity" : "channelswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/ChannelSwift.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "0cd14cad9014cfd920b09b1703c6b364c26c68c9"
+      }
+    },
+    {
+      "identity" : "code",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/Code.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "5cc4445accbafcb7ba2b8f374d75e2eacf748731"
+      }
+    },
+    {
+      "identity" : "component",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/Component.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "588fc5839c6c8cc3e9a15855bc865cef343113d4"
+      }
+    },
+    {
+      "identity" : "database",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/Database.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "7543f2721f99aa440fdf6c5e9a35761ee8e1812f"
+      }
+    },
+    {
+      "identity" : "dev",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/Dev.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "a4bc38ee4a37d1079b0dfcffccf8f032403f4ba7"
+      }
+    },
+    {
+      "identity" : "hubservice",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/HubService.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "3909dd0f0555ec4dacfc537a1d460fd3b7d9434e"
+      }
+    },
+    {
+      "identity" : "ssh",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/SSH.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "d1dc3312c5489d955a5e349908b6b2dc00efa172"
+      }
+    },
+    {
+      "identity" : "updatekit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/UpdateKit.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "3a207d1fbbfb72235d9e934ee2370e9df044d5f1"
+      }
+    },
+    {
+      "identity" : "vault",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/v57/Vault.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "d05d6017f3fc2bf18741705083cd2f59e27cbb15"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -30,9 +30,11 @@ AGENTS.md
 .hermes/
 KANBAN*.md
 
-# Package pins: the other v57 repositories follow GitHub's main until release (or the checkouts next to this
-# one, through <App>-Local.xcworkspace or V57_LOCAL=1), so nothing pins them
-/Get.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+# Package pins: the .xcodeproj's Package.resolved is committed and a release builds from it alone (security audit
+# H2: release.sh's check). The -Local workspace and SwiftPM's own pins follow the checkouts next to this one
+# (V57_LOCAL=1) or GitHub's main, so they stay unpinned
+/Get.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!/Get.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 /Get-Local.xcworkspace/xcshareddata/
 /Package.resolved
 # The app's package (App/): its build output and pins, as at the root

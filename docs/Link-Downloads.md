@@ -12,15 +12,15 @@ continue a download after an interruption.
 4. Click **Download**.
 
 The sheet's footer shows the name the file will get, or **Paste or type a link** while the field is empty. **Download**
-stays off until the link is valid. A link that isn't http or https shows **Not an http(s) or magnet link**.
+stays off until the link is valid. A link that isn't http or https shows **Not an http(s) link**.
 
 **Download on** appears when you have other devices. Leave it on **This Mac** to download here. See
 [Download on Another Device](Download-on-Another-Device.md).
 
 ### Magnet links
 
-The sheet accepts a magnet link, but Get can't download one yet. It says **Magnet links aren't supported yet. Open the
-.torrent file instead.** Download the `.torrent` file and open that.
+Get can't download a magnet link yet. In the sheet, a magnet link shows **Magnet links aren’t supported yet. Open the
+.torrent file instead.**, and **Download** stays off. Download the `.torrent` file and open that.
 
 ### A link to a .torrent file
 

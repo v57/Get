@@ -122,6 +122,13 @@ struct URLDownloadSheet: View {
   private var linkInvalid: Bool {
     !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && url == nil
   }
+  /// What's wrong with the typed link: a magnet link gets its own words, as Get has no magnet downloads yet (GT-001).
+  private var linkError: String? {
+    guard linkInvalid else { return nil }
+    return Self.isMagnet(link)
+      ? String(localized: "Magnet links aren’t supported yet. Open the .torrent file instead.")
+      : String(localized: "Not an http(s) link")
+  }
   /// Download on shows while there is a device to pick, or another account that may have some.
   private var offersDevices: Bool {
     demoDevices.map { !$0.isEmpty } ?? (!vaults.accounts.isEmpty || !vaults.personal.otherDeviceHosts.isEmpty)
@@ -130,12 +137,12 @@ struct URLDownloadSheet: View {
   var body: some View {
     KitSheet(
       title: "Download a Link",
-      meta: "An http(s) or magnet link. With a checksum, the finished file is checked against it.",
+      meta: "An http(s) link. With a checksum, the finished file is checked against it.",
       systemImage: "arrow.down", width: 480
     ) {
       FormCard {
         FormRow(
-          "URL", systemImage: "link", hue: .blue, error: linkInvalid ? "Not an http(s) or magnet link" : nil,
+          "URL", systemImage: "link", hue: .blue, error: linkError,
           field: TextField("URL", text: $link, prompt: Text("https://example.com/file.zip")))
         FormRow(
           "Checksum", systemImage: "key", hue: .gray,
@@ -193,24 +200,24 @@ struct URLDownloadSheet: View {
     vaults.account(id: accountID).flatMap { vaults.vault(for: $0) } ?? vaults.personal
   }
 
-  /// What the link will be saved as: its last path component, or its host (a magnet's name when it has one).
+  /// What the link will be saved as: its last path component, or its host.
   private static func name(of url: URL) -> String {
-    if url.scheme?.lowercased() == "magnet" {
-      let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "dn" }?.value
-      return name ?? "Magnet link"
-    }
     let last = url.lastPathComponent
     return last.isEmpty || last == "/" ? (url.host() ?? url.absoluteString) : last
   }
 
-  /// An http(s) or magnet link from typed or pasted text.
+  /// An http(s) link from typed or pasted text. Magnet links aren't taken: the torrent engine can't fetch a torrent's
+  /// metadata from peers yet, only open a .torrent file.
   static func parse(_ text: String) -> URL? {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() else { return nil }
     switch scheme {
     case "http", "https": return url.host() == nil ? nil : url
-    case "magnet": return url
     default: return nil
     }
+  }
+
+  static func isMagnet(_ text: String) -> Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("magnet:")
   }
 }

@@ -34,12 +34,12 @@ struct URLDownloadDetailView: View {
           }
         }
         if let device = item.device {
-          KitSection("On \(device)", meta: "over SSH through your Hub", systemImage: "point.3.connected.trianglepath.dotted", hue: .purple) {
+          KitSection("On \(device)", meta: String(localized: "over SSH through your Hub"), systemImage: "point.3.connected.trianglepath.dotted", hue: .purple) {
             InspectorRow("Device", value: device, copyable: false)
             if let path = item.remotePath {
               InspectorRow("Saved as", value: path)
             } else {
-              InspectorRow("Saving to", value: "Downloads on \(device)", copyable: false)
+              InspectorRow("Saving to", value: String(localized: "Downloads on \(device)"), copyable: false)
             }
           }
         }
@@ -55,11 +55,11 @@ struct URLDownloadDetailView: View {
                 .foregroundStyle(Hue.green.text)
             }
           } else if let checksum = item.checksum {
-            InspectorRow("Checksum", value: "\(checksum.algorithm.rawValue), checked when finished", copyable: false)
+            InspectorRow("Checksum", value: String(localized: "\(checksum.algorithm.rawValue), checked when finished"), copyable: false)
           }
           if item.device == nil, item.state == .downloading || item.state == .paused, item.totalBytes != nil {
             InspectorRow(
-              "Resume", value: item.resumable ? "Continues after interruptions" : "The server can't resume; restarts",
+              "Resume", value: item.resumable ? String(localized: "Continues after interruptions") : String(localized: "The server can't resume; restarts"),
               copyable: false)
           }
         }
@@ -70,11 +70,11 @@ struct URLDownloadDetailView: View {
   /// "Downloading · 4 connections · 3.2 MB/s", "Downloading on Mac Studio · 45%".
   private var status: String {
     if let device = item.device {
-      return [item.state.label + " on \(device)", item.state == .downloading ? "\(Int(item.progress * 100))%" : ""]
+      return [String(localized: "\(item.state.label) on \(device)"), item.state == .downloading ? "\(Int(item.progress * 100))%" : ""]
         .filter { !$0.isEmpty }.joined(separator: " · ")
     }
     var parts = [item.state.label]
-    if item.state == .downloading, item.connections > 1 { parts.append("\(item.connections) connections") }
+    if item.state == .downloading, item.connections > 1 { parts.append(String(localized: "\(item.connections) connections")) }
     if !item.speed.isEmpty { parts.append(item.speed) }
     return parts.joined(separator: " · ")
   }
@@ -83,14 +83,14 @@ struct URLDownloadDetailView: View {
   private var size: String {
     let received = item.receivedBytes.formatted(.byteCount(style: .file))
     guard let total = item.totalBytes else { return received }
-    return "\(received) of \(total.formatted(.byteCount(style: .file)))"
+    return String(localized: "\(received) of \(total.formatted(.byteCount(style: .file)))")
   }
 
   /// "38.9 of 48 MB · 3.2 MB/s"; on another device its share done ("45%", "Done").
   private var transferMeta: [String] {
     guard item.device != nil else { return [size, item.speed] }
     switch item.state {
-    case .completed: return ["Done"]
+    case .completed: return [String(localized: "Done")]
     case .downloading: return ["\(Int(item.progress * 100))%"]
     default: return [item.state.label]
     }

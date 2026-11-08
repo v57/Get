@@ -274,7 +274,7 @@ struct TorrentView: View {
             return
           }
           guard url.pathExtension.lowercased() == "torrent" else {
-            store.lastError = "Not a .torrent file: \(url.lastPathComponent)"
+            store.lastError = String(localized: "Not a .torrent file: \(url.lastPathComponent)")
             return
           }
           await store.open(url: url)
@@ -334,8 +334,10 @@ private struct DownloadRow: View {
 
   /// A download on another device stops there, and its file stays.
   private var trashPreview: String {
-    if let device = item.device { return "Takes it off the list. Its file stays on \(device)." }
-    return "Takes it off the list and moves \(item.isSingleFile ? "its file" : "its files") to the Trash."
+    if let device = item.device { return String(localized: "Takes it off the list. Its file stays on \(device).") }
+    return item.isSingleFile
+      ? String(localized: "Takes it off the list and moves its file to the Trash.")
+      : String(localized: "Takes it off the list and moves its files to the Trash.")
   }
 
   @ViewBuilder private var action: some View {
@@ -673,7 +675,7 @@ extension DownloadStore.DownloadItem {
 
   /// The toolbar title's meta: "Downloading · 18.4 MB/s · 62% · 3 min left".
   var metaParts: [String] {
-    let place = device.map { ["on \($0)"] } ?? []
+    let place = device.map { [String(localized: "on \($0)")] } ?? []
     switch state {
     case .completed: return [state.label] + place + [totalLength.map { $0.formatted(.byteCount(style: .file)) } ?? ""]
     case .failed, .stopped: return [state.label] + place
@@ -686,12 +688,12 @@ extension DownloadStore.DownloadItem {
     guard let remaining, state == .downloading || state == .checking else { return "" }
     let left = Duration.seconds(max(1, remaining)).formatted(
       .units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: remaining >= 3600 ? 2 : 1))
-    return "\(left) left"
+    return String(localized: "\(left) left")
   }
 
   /// The sidebar row's status line: "62% · 18.4 MB/s", "Paused · 14%", "784 MB · 2 hours ago".
   var rowStatus: String {
-    let place = device.map { ["on \($0)"] } ?? []
+    let place = device.map { [String(localized: "on \($0)")] } ?? []
     let parts =
       switch state {
       case .downloading: ["\(Int(progress * 100))%", speed] + place
@@ -735,24 +737,24 @@ extension DownloadStore {
     let active = activeItems
     guard !active.isEmpty else {
       let count = items.count { $0.state != .completed }
-      return [count == 0 ? "No downloads" : count == 1 ? "1 download" : "\(count) downloads"]
+      return [count == 0 ? String(localized: "No downloads") : count == 1 ? String(localized: "1 download") : String(localized: "\(count) downloads")]
     }
-    return ["\(active.count) downloading", Self.formatSpeed(active.reduce(0) { $0 + $1.bytesPerSecond })]
+    return [String(localized: "\(active.count) downloading"), Self.formatSpeed(active.reduce(0) { $0 + $1.bytesPerSecond })]
   }
 
   /// "12 downloads · 18.2 GB": the Downloaded section's meta.
   var finishedMeta: [String] {
     let finished = finishedItems
     let bytes = finished.filter { $0.device == nil }.compactMap(\.totalLength).reduce(0, +)
-    return [finished.count == 1 ? "1 download" : "\(finished.count) downloads", bytes > 0 ? bytes.formatted(.byteCount(style: .file)) : ""]
+    return [finished.count == 1 ? String(localized: "1 download") : String(localized: "\(finished.count) downloads"), bytes > 0 ? bytes.formatted(.byteCount(style: .file)) : ""]
       .filter { !$0.isEmpty }
   }
 
   /// The window title's meta with nothing selected: "5 downloads · 3 active · 60%".
   var summaryParts: [String] {
-    var parts = [items.count == 1 ? "1 download" : "\(items.count) downloads"]
+    var parts = [items.count == 1 ? String(localized: "1 download") : String(localized: "\(items.count) downloads")]
     if case .working(let progress?) = overallStatus {
-      parts += ["\(activeItems.count) active", "\(Int(progress * 100))%"]
+      parts += [String(localized: "\(activeItems.count) active"), "\(Int(progress * 100))%"]
     }
     return parts
   }
@@ -761,12 +763,12 @@ extension DownloadStore {
 extension TorrentState {
   var label: String {
     switch self {
-    case .stopped: "Stopped"
-    case .checking: "Checking"
-    case .downloading: "Downloading"
-    case .paused: "Paused"
-    case .completed: "Completed"
-    case .failed: "Failed"
+    case .stopped: String(localized: "Stopped")
+    case .checking: String(localized: "Checking")
+    case .downloading: String(localized: "Downloading")
+    case .paused: String(localized: "Paused")
+    case .completed: String(localized: "Completed")
+    case .failed: String(localized: "Failed")
     }
   }
 

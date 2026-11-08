@@ -469,10 +469,10 @@ import os
     switch url.scheme?.lowercased() {
     case "http", "https": break
     case "magnet":
-      lastError = "Magnet links aren't supported yet. Open the .torrent file instead."
+      lastError = String(localized: "Magnet links aren't supported yet. Open the .torrent file instead.")
       return
     default:
-      lastError = "Get downloads http and https links."
+      lastError = String(localized: "Get downloads http and https links.")
       return
     }
     if url.pathExtension.lowercased() == "torrent" {
@@ -597,7 +597,7 @@ import os
     case .verified(let checksum):
       items[index].verifiedChecksum = checksum
     case .error(let message):
-      items[index].error = "Retrying: \(message)"
+      items[index].error = String(localized: "Retrying: \(message)")
     }
   }
 
@@ -619,7 +619,7 @@ import os
         items[index].location = to
         items[index].title = name
       } catch {
-        items[index].error = "Couldn't move \(from.lastPathComponent) to Downloads: \(error.localizedDescription)"
+        items[index].error = String(localized: "Couldn't move \(from.lastPathComponent) to Downloads: \(error.localizedDescription)")
         return
       }
     }
@@ -642,7 +642,7 @@ import os
   func download(from url: URL, checksum: Checksum? = nil, onDevice hostID: String, in vault: Vault) {
     guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.pathExtension.lowercased() != "torrent"
     else {
-      lastError = "Another device downloads http and https files; open torrents on this \(KitDevice.nameInSentence)."
+      lastError = String(localized: "Another device downloads http and https files; open torrents on this \(KitDevice.nameInSentence).")
       return
     }
     let digest = SHA256.hash(data: Data((hostID + "|" + url.absoluteString).utf8))
@@ -701,7 +701,7 @@ import os
         if expected.hex == hex {
           items[index].verifiedChecksum = expected
         } else {
-          items[index].error = "The file on \(items[index].device ?? "the device") doesn’t match the \(expected.algorithm.rawValue) checksum."
+          items[index].error = String(localized: "The file on \(items[index].device ?? "the device") doesn’t match the \(expected.algorithm.rawValue) checksum.")
         }
       }
     case .failed(let message): items[index].error = message

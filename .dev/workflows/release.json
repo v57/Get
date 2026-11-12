@@ -1,0 +1,69 @@
+{
+  "continueOnFailure" : false,
+  "id" : "release",
+  "name" : "Release (GitHub)",
+  "steps" : [
+    {
+      "id" : "check",
+      "kind" : "release",
+      "name" : "Check · macOS",
+      "parallel" : false,
+      "platform" : "macos",
+      "releaseStep" : "check",
+      "runner" : "mac"
+    },
+    {
+      "id" : "archive-macos",
+      "kind" : "release",
+      "name" : "Archive · macOS",
+      "parallel" : false,
+      "platform" : "macos",
+      "releaseStep" : "archive",
+      "runner" : "mac"
+    },
+    {
+      "id" : "direct",
+      "kind" : "release",
+      "name" : "Sign & Notarize",
+      "parallel" : false,
+      "platform" : "macos",
+      "releaseStep" : "direct",
+      "runner" : "mac"
+    },
+    {
+      "id" : "archive-windows",
+      "kind" : "release",
+      "name" : "Archive · Windows",
+      "parallel" : false,
+      "platform" : "windows",
+      "releaseStep" : "archive",
+      "runner" : "vm:Windows"
+    },
+    {
+      "id" : "archive-linux",
+      "kind" : "release",
+      "name" : "Archive · Linux",
+      "parallel" : false,
+      "platform" : "linux",
+      "releaseStep" : "archive",
+      "runner" : "vm:Ubuntu"
+    },
+    {
+      "id" : "bundle",
+      "kind" : "release",
+      "name" : "Result Archive",
+      "parallel" : false,
+      "releaseStep" : "bundle",
+      "runner" : "mac"
+    },
+    {
+      "id" : "github",
+      "kind" : "release",
+      "name" : "GitHub Release",
+      "parallel" : false,
+      "releaseStep" : "github",
+      "runner" : "mac"
+    }
+  ],
+  "trigger" : {}
+}

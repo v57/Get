@@ -26,7 +26,8 @@ To download a link:
 
 1. Copy the link.
 2. Click the link button in the toolbar, or **Download a Link** at the bottom of the sidebar.
-3. Get fills in the **URL** field from the clipboard. Check it, and click **Download**.
+3. If the clipboard holds an http or https link, Get fills it in to the **URL** field. Check it, and click
+   **Download**.
 
 To download a torrent, click **+** in the toolbar and pick a `.torrent` file. You can also:
 

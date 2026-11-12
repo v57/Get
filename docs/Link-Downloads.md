@@ -7,7 +7,7 @@ continue a download after an interruption.
 
 1. Click the link button in the toolbar, **Download a Link** at the bottom of the sidebar, or **Download a Link…** on
    the welcome screen.
-2. In **URL**, paste or type the link. If the clipboard holds a link, Get fills it in for you.
+2. In **URL**, paste or type the link. If the clipboard holds an http or https link, Get fills it in for you.
 3. Optionally, paste a checksum in **Checksum**.
 4. Click **Download**.
 

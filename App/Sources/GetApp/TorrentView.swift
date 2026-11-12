@@ -633,7 +633,7 @@ private struct FileGroup: Identifiable {
 
   /// "3 files · 15.3 MB · done", "2 files · 2.9 of 11.3 MB · 6.1 MB/s", "2 files · waiting".
   func meta(speed: String) -> [String] {
-    let count = files.count == 1 ? "1 file" : "\(files.count) files"
+    let count = String(localized: "\(files.count) files")
     let size = Int64(length).formatted(.byteCount(style: .file))
     switch status {
     case .done: return [count, size, "done"]
@@ -737,7 +737,7 @@ extension DownloadStore {
     let active = activeItems
     guard !active.isEmpty else {
       let count = items.count { $0.state != .completed }
-      return [count == 0 ? String(localized: "No downloads") : count == 1 ? String(localized: "1 download") : String(localized: "\(count) downloads")]
+      return [count == 0 ? String(localized: "No downloads") : String(localized: "\(count) downloads")]
     }
     return [String(localized: "\(active.count) downloading"), Self.formatSpeed(active.reduce(0) { $0 + $1.bytesPerSecond })]
   }
@@ -746,13 +746,13 @@ extension DownloadStore {
   var finishedMeta: [String] {
     let finished = finishedItems
     let bytes = finished.filter { $0.device == nil }.compactMap(\.totalLength).reduce(0, +)
-    return [finished.count == 1 ? String(localized: "1 download") : String(localized: "\(finished.count) downloads"), bytes > 0 ? bytes.formatted(.byteCount(style: .file)) : ""]
+    return [String(localized: "\(finished.count) downloads"), bytes > 0 ? bytes.formatted(.byteCount(style: .file)) : ""]
       .filter { !$0.isEmpty }
   }
 
   /// The window title's meta with nothing selected: "5 downloads · 3 active · 60%".
   var summaryParts: [String] {
-    var parts = [items.count == 1 ? String(localized: "1 download") : String(localized: "\(items.count) downloads")]
+    var parts = [String(localized: "\(items.count) downloads")]
     if case .working(let progress?) = overallStatus {
       parts += [String(localized: "\(activeItems.count) active"), "\(Int(progress * 100))%"]
     }

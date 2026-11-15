@@ -13,6 +13,7 @@ import URLDownload
 ///                            (the list without it)
 ///   --device <state>         the Fedora image on home-nas: downloading (the default), completed or failed
 ///   --error <message>        shows the error a download couldn't start with
+///   --demo-scale <n>         n more files in the photo archive and n more finished downloads (performance runs)
 ///
 /// A capture by `dev-screenshots` takes every scene in one launch: `TorrentView` opens each next scene from its
 /// arguments through `DevScreenshots`.
@@ -113,7 +114,25 @@ enum ScreenshotDemo {
     blender.receivedBytes = 412_000_000
     blender.totalBytes = 412_000_000
 
-    let items = [ubuntu, photos, font, kali, blender, debian]
+    // Performance runs: `--demo-scale <n>` gives the photo archive n more files and the list n more finished downloads.
+    let scale = value("--demo-scale", in: arguments).flatMap(Int.init) ?? 0
+    var extra: [Item] = []
+    if scale > 0 {
+      photos.files += (0..<scale).map { k in
+        File(index: names.count + k, path: "\(10 + k / 100) Trip/IMG_\(1000 + k).heic", length: 4_800_000, verifiedBytes: k % 3 == 0 ? 4_800_000 : 0, sequentialBytes: 0)
+      }
+      photos.fileOrder = Array(photos.files.indices)
+      extra = (0..<scale).map { k in
+        var item = Item(id: "demo-scale-\(k)", title: "archive-\(k).tar.zst")
+        item.state = .completed
+        item.progress = 1
+        item.finishedAt = .now - Double(k) * 600
+        item.files = [File(index: 0, path: "archive-\(k).tar.zst", length: 120_000_000, verifiedBytes: 120_000_000, sequentialBytes: 120_000_000)]
+        item.fileOrder = [0]
+        return item
+      }
+    }
+    let items = [ubuntu, photos, font, kali, blender, debian] + extra
     if flag("--add-url", in: arguments) { return items }
     return items + [fedora(value("--device", in: arguments) ?? "downloading")]
   }

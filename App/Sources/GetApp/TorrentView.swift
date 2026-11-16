@@ -95,7 +95,9 @@ struct TorrentView: View {
         showURLSheet = true
       }
     } recents: {
-      ForEach(store.finishedItems) { item in
+      // The newest only: the welcome's list isn't lazy (each row is laid out as it scrolls; 2,006 finished downloads
+      // took 7–100 ms a frame), and the sidebar's Downloaded section lists them all.
+      ForEach(store.finishedItems.prefix(50)) { item in
         RecentItem(
           item.title, subtitle: item.device.map { "On \($0)" } ?? item.totalLength?.formatted(.byteCount(style: .file)),
           systemImage: item.isSingleFile ? "doc" : "folder", id: item.id

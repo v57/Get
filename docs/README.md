@@ -8,8 +8,8 @@ download on another of your devices, such as a home server or another Mac.
 
 - **Mac:** macOS 14 or later, on Apple silicon.
 - **iPhone and iPad:** no app. Get runs on the Mac only.
-- **Linux and Windows:** Get builds for both on v57's own SwiftUI, but these builds aren't released yet. iCloud isn't
-  available there, so the iCloud card in Settings says **Not on this device**.
+- **Linux and Windows:** Get builds for both on v57's own SwiftUI, but these builds aren't released yet. They have no
+  Settings window, and iCloud isn't available there.
 
 ## Pages
 
@@ -18,7 +18,17 @@ download on another of your devices, such as a home server or another Mac.
 - [Torrents](Torrents.md): .torrent files, folders, per-file choices and priorities.
 - [Download on Another Device](Download-on-Another-Device.md): a link that downloads on another of your devices.
 - [Managing Downloads](Managing-Downloads.md): the sidebar, search, the Trash and what Get keeps between launches.
+- [Settings](Settings.md): iCloud, and where the update checks are.
+- [Keyboard Shortcuts](Keyboard-Shortcuts.md): the few keys Get has.
 - [Privacy and Security](Privacy-and-Security.md): what Get sends over the network, quarantine, keys and iCloud.
+
+## Libraries
+
+Get's engine is three Swift libraries other apps can use:
+
+- [GetKit](GetKit.md): progress, speed and time left for a download.
+- [Torrent](Torrent.md): the BitTorrent engine.
+- [URLDownload](URLDownload.md): http and https downloads with several connections, resume and checksums.
 
 ## Works with other v57 apps
 
